@@ -1,0 +1,144 @@
+---
+title: "Adding data to the BEH Walk SmartMap"
+date: "2025-11-25"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      eval = FALSE)
+#install.packages("DT", type = "binary")
+```
+```{r load functions, eval=TRUE, echo=FALSE, message = FALSE}
+
+invisible(
+  capture.output(
+    suppressMessages(
+    suppressWarnings({
+
+list.of.packages <- c('dplyr', 'glue', 'vctrs', 'DT', 'tidycensus', 'terra')
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+lapply(list.of.packages,function(x){library(x,character.only=TRUE)}) 
+library(glue)
+library('RPostgres')
+library(tidyr)
+## UPDATE Working directory
+wd <- 'H:/projects/beh_nwi_smartmap'
+setwd('H:/projects/beh_nwi_smartmap')
+getwd()
+source(glue('{wd}/tools/create_walkability_measures.R'))
+source(glue('{wd}/tools/walkdb_setup.R'))
+
+## clear tigris cache before downloading:
+unlink(tigris::tigris_cache_dir('~/.tigris_cache'), recursive = TRUE)
+tigris::tigris_cache_dir("~/.tigris_cache")
+options(tigris_use_cache = FALSE)
+readRenviron('~/.Renviron')
+
+# connect to database & set dsn
+## update database username & password
+U <- us_census <- connectdb(dbname = 'nwi_smartmap', host = 'doyenne.csde.washington.edu', port = 5432, 
+                   password = 'csde4322', user = 'aybloom')
+dsn = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432" 
+
+})
+)))
+
+```
+
+# Check database schemas and data availability for years / states
+*note that water data is not available for years prior to 2011*
+
+  List current schemas and database tables set up in the nwi_smartmap database
+  <!-- Should include: (1) tract land, (2) area water, (3) tract_nowater, (4) tract_variables, and (4) edges (intersections) -->
+
+```{r check db, eval = TRUE}
+# Ensure schemas exist
+check_for_schemas()
+# check for data by state / year
+state_year_list <- get_db_list_states_years()
+
+state_year_list %>% arrange(statefp, year)
+
+```
+
+## Check raster file availability for years / states
+
+  List of the raster files that have been created so far for each year. 
+  
+  Raster files should include: (1) land area, (2) population density, (3) intersection density, and (4) business density.
+  
+```{r list raster files, eval = TRUE}
+check_raster_files()
+```
+
+### Add data for set states and years to Smartwalk database
+```{r get missing data, eval=FALSE}
+# set years / states list 
+year_list <- c(2007)
+state_abbr_list <- c('pa', 'mn')
+
+# set up database partitions for years / states to add data
+f_setup_database(conn = U, year_list = year_list, state_abbr_list = state_abbr_list)
+
+# download and add tract land, water, land with water erased, population variables and edges to database
+f_add_data_smartwalk_db(conn = U, years=year_list, state_abbr_list = state_abbr_list)
+
+
+
+```
+
+## Create state-level raster files for land area, population, intersection density
+
+```{r rasterize intersection, land, population}
+
+# Create raster files for tract land area, population density, intersection density 
+f_create_raster_files(conn = U, years = year_list, state_abbr_list = state_abbr_list)
+```
+
+## Create state-level raster files for business density
+
+To get business data, you need to access the data enclave (see data enclave r code folder)
+** First transfer the 2016 land area file for the state of interest to the data enclave folder (to ensure consistent extents of the raster file). 
+
+** Next, use the code in the r_code_base folder while in the data enclave to create a raster file of businesses for a given year and state. The get_raster_stacks.r file creates and runs the function to create a raster. 
+
+** To export the raw raster file, use the Data Enclave process to export from the data enclave and save the state_raster/business/{yr}/sum folder to run the function below. 
+
+```{r rasterize business data}
+ state_fips <- fips_codes %>% filter(state %in% toupper(state_abbr_list))
+ for(state_fips_code in unique(state_fips$state_code)){
+    for(yr in years){
+      business_sum_filepath <- glue('H:/projects/beh_nwi_smartmap/data/state_raster/business/{yr}/sum/state_raster_business_density_{yr}_{state_fips_code}.tif')
+      if(file.exists(business_sum_filepath)){
+      f_get_business_density(state_fips = state_fips_code,
+                             year = yr,
+                             verbose = TRUE)
+      } else if(!file.exists(business_sum_filepath)){
+       message(glue('.... need to extract business data for {year}, for {state} from the Data Enclave'))
+      }
+    }}
+```
+
+## Create a composite walk measures
+The Composite walk measure is created by finding the year- and state- specific z-score of (1) businesses density, (2) population density, and (3) street network density and summing to create a composite measure. The function below calcualtes the z-score for each state/year and creates a raster files with the composite scores for a given year/state. 
+
+```{r create composite scores}
+ state_fips <- fips_codes %>% filter(state %in% toupper(state_abbr_list))
+for(yr in year_list){
+  for(f in state_fips){
+
+# create composite walk scores
+f_create_composite_measure_raster(yr = yr, 
+                                              state_fips = f)
+}}
+```
+

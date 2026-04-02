@@ -1,0 +1,610 @@
+---
+title: "Walkability data pulls for longitudinal data"
+author: "Amy Youngbloom"
+date: "2025-09-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(RPostgres)
+library(DBI)
+library(leaflet)
+library('glue')
+library(sf)
+```
+## connect the database to R environment
+```{r connect db}
+# PostGIS db (docker)
+source("H:/projects/beh_nwi_smartmap/dbconnect.R")
+U <- us_census <- connectdb()
+```
+
+## get tract functions download post gis partition functions & set up the tables and partitions
+```{r tract functions}
+source('tools/tracts_download_postgis_partition.R')
+# update states and fips: 
+# states and counties FIPS codes
+states_fips <- '53'
+counties_fips <- fips_codes %>% dplyr::filter(state_code %in% states_fips)
+dsn = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432"
+
+#update years: 
+years<-c(2016)
+
+# UPDATE - add create tmp schema to prevent error thrown
+dbExecute(U, "CREATE SCHEMA IF NOT EXISTS tmp;")
+# create schemas
+f_tract_create_schema()
+ ## throws error: tmp.tract does not exist at character 46
+#create table for single tract
+T()
+
+# create schemas
+f_tract_create_partitions()
+
+```
+
+```{r view all the schemas and tables and partitions}
+parents <- dbGetQuery(U, "
+  SELECT schemaname
+  FROM pg_catalog.pg_tables t
+  WHERE t.schemaname NOT IN ('pg_catalog', 'information_schema')
+    AND t.tablename IN (
+      SELECT relname
+      FROM pg_class c
+      JOIN pg_partitioned_table p ON c.oid = p.partrelid
+    )
+  ORDER BY schemaname, tablename;
+")
+
+print(parents)
+
+partitions <- dbGetQuery(U, "
+  SELECT
+    child.relname AS partition_name,
+    parent.relname AS parent_table,
+    ns_child.nspname AS schema_name
+  FROM pg_inherits
+  JOIN pg_class parent ON pg_inherits.inhparent = parent.oid
+  JOIN pg_class child ON pg_inherits.inhrelid = child.oid
+  JOIN pg_namespace ns_child ON child.relnamespace = ns_child.oid
+  ORDER BY parent.relname, child.relname;
+")
+
+print(partitions)
+
+dbListTables(U)
+
+```
+
+```{r test run eval=FALSE}
+# get data
+dsn = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432" 
+f_tract_getdata_0one(year=2016, state='53', county = '077', verbose=TRUE)
+
+## troubleshooting: 
+dbExecute(U, 'DROP TABLE IF EXISTS tmp.tct')
+dbExecute(U, "DROP TABLE IF EXISTS tmp.tract;")
+
+# x_file <- st_read(glue('{tmp}/x.gpkg'))
+
+## does not work!!
+#cmd_test <- 'ogr2ogr -f PostgreSQL "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432" #C:/Temp/4/RtmpUTYd0F/x.gpkg -nln tmp.tct nlt MULTIPOLYGON'
+#system(cmd_test)
+
+#cmd_test2 <- glue('ogr2ogr -f PostgreSQL "{dsn}" {tmp}\\x.gpkg x -lco geometry_name=geom_4326 -nln tct -lco schema=tmp -lco OVERWRITE=YES #-nlt multipolygon')
+#system(cmd_test2)
+
+## 10/22 -- updated the function to use st_write to write the table to tmp.tct in the dv
+
+dbGetQuery(U, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema='tmp';")
+
+# check table
+dbGetQuery(U, "SELECT * FROM tract.tract LIMIT 5;") # written above (final file)
+dbGetQuery(U, "SELECT * FROM tmp.tract LIMIT 5;") ## written in the T() function
+dbGetQuery(U, "SELECT * FROM tmp.tct LIMIT 5;") # written above (temp file)
+```
+
+```{r pull in all the data for 2016, WA state}
+states_fips <- '53'
+counties_fips <- fips_codes %>% dplyr::filter(state_code %in% states_fips)
+
+# years 
+years<-c(2016)
+
+f_getdata_1all(startrun = 1, vrb = TRUE)
+```
+
+```{r view the tract.tract table data}
+dbGetQuery(U, "SELECT * FROM tract.tract LIMIT 15;")
+
+# Unique states present
+states <- dbGetQuery(U, "SELECT DISTINCT statefp FROM tract.tract ORDER BY statefp;")
+print(states)
+
+# Total number of rows
+nrows <- dbGetQuery(U, "SELECT COUNT(*) AS total FROM tract.tract;")
+print(nrows$total) ## total should be 1458 (total census tracts in WA state)
+```
+
+## download water shapefiles
+```{r set up tables and schema for water}
+source('tools/area_water_download_postgis_partition.R')
+# states and counties FIPS codes
+states_fips <- '53'
+counties_fips <- fips_codes %>% dplyr::filter(state_code %in% states_fips)
+
+#update years: 
+years<-c(2016)
+
+dsn = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432" 
+
+# create schemas
+f_water_create_schema()
+
+#create table for single tract
+W(overwrite = TRUE)
+
+# create partitions
+f_water_create_partitions()
+
+```
+
+```{r test water download}
+f_water_getdata_0one(year = 2016, state = '53', county = '033', verbose = TRUE)
+
+# check table
+dbGetQuery(U, "SELECT * FROM tmp.area_water LIMIT 10;")
+dbGetQuery(U, "SELECT * FROM area_water.area_water LIMIT 10;")
+
+area_water_tbl<-dbGetQuery(U, "SELECT * FROM area_water_state.area_water_2016_53 LIMIT 10;")
+head(area_water_tbl)
+
+```
+
+## download all the water and put in partitioned tables
+```{r download water for WA state for 2016}
+states_fips <- '53'
+counties_fips <- fips_codes %>% dplyr::filter(state_code %in% states_fips)
+
+# years 
+years<-c(2016)
+
+f_water_getdata_1all(startrun = 1, vrb = TRUE)
+
+# check table
+area_water_tbl<-dbGetQuery(U, "SELECT * FROM area_water_county.area_water_2016_53_009")
+head(area_water_tbl)
+
+colnames(area_water_tbl
+         )
+```
+
+## remove water from tract area shapefiles
+```{r create nonwater partitions and schemas}
+source('tools/tracts_erase_water.R')
+## set list of years & states 
+year_list <- c(2006, 2016)
+state_abbr_list = c('wa', 'mn')
+
+## create no_water schemas and partitions
+f_nowater_create_schemas()
+f_nowater_tract()
+f_nowater_create_partitions()
+```
+
+## erase water
+```{r test erase water download}
+counties_df %<>% filter(state_code == '53')
+
+# erase for King County table (county = 33)
+f_erase_0one(i=17)
+
+
+
+#con_str = "PG:host=db dbname=walk_db user=aybloom password=census port=5432"
+con_str = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432" 
+
+
+# check table - water removed
+tract_with_water<-st_read(con_str, query = glue('SELECT * from tract.tract'))
+tract_no_water_tbl<-st_read(con_str, query = glue('SELECT * from tract_nowater_state.tract_nowater_2016_53'))
+state_nowater_tbl <- st_read(con_str, query = 'SELECT * from tract_nowater.tract_nowater')
+water<-st_read(con_str, query = glue('SELECT * from area_water.area_water'))
+
+tract_with_water[which(tract_with_water$tractce == '031800'),] %>% leaflet() %>% addTiles() %>% addPolygons()
+
+# pick your tract
+tract_sel <- tract_with_water %>% 
+  filter(tractce == "031800")
+
+# make sure everything is in same CRS
+water <- st_transform(water, 4326)
+tract_sel <- st_transform(tract_sel, 4326)
+
+# spatial filter: keep only water polygons that intersect tract
+water_in_tract <- st_intersection(water, tract_sel)
+
+# get bounding box of the tract (or of water_in_tract)
+bb <- st_bbox(tract_sel)
+
+# plot water just in the tract:
+leaflet() %>%
+  addTiles() %>%
+  addPolygons(data = water_in_tract, color = "blue", weight = 1, fillOpacity = 0.5) %>%
+  addPolygons(data = tract_sel, color = "red", weight = 2, fill = FALSE)
+
+tract_no_water_tbl[which(tract_no_water_tbl$tractce == '031800'),] %>% leaflet() %>% addTiles() %>% addPolygons()
+
+#another tract with water:
+tract_no_water_tbl[which(tract_no_water_tbl$tractce == '004100' & tract_no_water_tbl$countyfp == '033'),] %>% leaflet() %>% addTiles %>% addPolygons()
+
+```
+
+## erase all the water and put in partitioned no water tables
+```{r erase water for WA state for 2016}
+states_fips <- '53'
+counties_fips <- fips_codes %>% dplyr::filter(state_code %in% states_fips)
+
+# years 
+years<-c(2016)
+
+f_erase_1all(startnum = 1, verbose = TRUE)
+
+## view a tract_nowater.tract_nowater table for county 033 for state 53
+dbGetQuery(conn = U, 
+           statement = 'SELECT * FROM tract_nowater_county.tract_nowater_2016_53_033 LIMIT 5')
+
+```
+
+## Download population counts
+```{r download population counts}
+source('tools/tracts_population_download.R')
+## update states / years to WA 2016
+# states and counties FIPS codes
+states_fips <- "53"
+counties_fips <- fips_codes %>% dplyr::filter(state_code %in% states_fips)
+
+# years
+#years <- c(2000, 2010:2020)
+years<-2016
+
+# these next create data frames enumerating the tables to be created
+# year-state-county
+counties_fips <- fips_codes %>%
+  dplyr::filter(state_code %in% states_fips) %>%
+  crossing(years)
+
+## update counties_df
+# tracts-years-states
+counties_df <- counties_fips %>%
+  select(years, state_code, county_code) %>%
+  distinct() %>%
+  mutate(tablename = str_c("tract_variables_county.tract_variables", years, state_code, county_code, sep = "_")) %>%
+  # drop alaska
+  filter(state_code != "02") %>%
+  arrange(state_code, years, county_code) %>%
+  mutate(rn = 1:nrow(.)) %>%
+  select(rn, everything())
+
+## create schemas/partitions:
+f_pop_create_schemas()
+f_pop_template()
+f_pop_create_partitions()
+
+```
+```{r get King county data}
+# get data for King County tracts: 
+
+tract_table <- f_tractvar_0one(myYear = 2016, myState_fips = '53', myCounty_fips = '033', vrb = TRUE)
+
+# view table
+dbGetQuery(U, "SELECT * FROM tract_variables.tract_variables LIMIT 15;")
+
+# check table
+tract_tbl<-dbGetQuery(U, "SELECT * FROM tract_variables_county.tract_variables_2016_53_033 LIMIT 5")
+head(tract_tbl)
+
+colnames(tract_tbl)
+
+```
+```{r download all WA state 2016 population county data}
+f_tractvar_1all(startnum = 1, verbose = TRUE)
+```
+```{r get population per cell}
+source('tools/tract_population_per_cell.R')
+counties_df %<>% filter(state_code == '53' & year == 2016)
+
+
+# con_str = "PG:host=db dbname=walk_db user=aybloom password=census port=5432"
+con_str = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432" 
+
+f_merge_population_tract_nowater_1all(startnum = 1, 
+                                      replace = TRUE, 
+                                                  resolution_m = 100,
+                                                  verbose = TRUE)
+
+tract_nowater <- st_read(con_str, query = glue("SELECT * from tract_nowater.tract_nowater"))
+head(tract_nowater)
+```
+
+## Rasterize the tract no water shapefiles and population counts and save to container
+```{r rasterize tract files}
+source('tools/tracts_rasterize_partition_data.R')
+counties_df %<>% filter(state_code == '53' & year == 2016)
+# test one
+#f_rasterize_0one(conn = U, i = 1, resolution_m = 100, verbose = TRUE)
+
+dsn = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432" 
+# rasterize all data
+f_tract_var_rasterize_1all(conn = U, resolution_m = 100, replace = FALSE)
+
+## check a raster file
+list.files('~')
+tract_raster_land <- rast(glue('data/tract_raster_county/2016/53/tract_raster_land_area_2016_53_001.tif'))
+tract_raster_pop <- rast('data/tract_raster_county/2016/53/tract_raster_population_2016_53_001.tif')
+res(tract_raster_land)
+
+plot(tract_raster_pop)
+plot(tract_raster_land)
+```
+## combine tract-level raster files into a state file
+```{r combine tract rasters}
+source('tools/focal_area_functions.R')
+
+# combine to state-level raster
+f_combine_tract_land_raster(year = 2016, state = 53, 
+                            county_filepath = 'data/tract_raster_county',
+                            state_filepath = 'data/state_raster/land_area')
+f_combine_tract_pop_raster(year = 2016, state = 53, 
+                           county_filepath = 'data/tract_raster_county',
+                           state_filepath = 'data/state_raster/population_density')
+
+# test map the state raster
+state_raster <- rast(glue('data/state_raster/land_area/2016/raw/state_raster_raw_2016_53.tif'))
+plot(state_raster)
+
+pop_raster <- rast(glue('data/state_raster/population_density/2016/raw/state_raster_raw_2016_53.tif'))
+plot(pop_raster)
+# check the resolution of the state raster
+res(state_raster)
+print(crs(state_raster))
+res(pop_raster)
+```
+
+## Focal Sum for 1km circle area per 100m cell -- find the counts of cells (with land area vs. water) within 1 km. 
+```{r focal sum stats}
+source('tools/focal_area_functions.R')
+
+# process land area focal sums -- find counts of land area for 1km, then convert to hectares (divide by 100) -
+f_land_focus_processing(year = 2016, state_code = '53', 
+                        radius_cir_crs_units = 1000 # radius of circle in the crs units (meters)
+)
+
+f_pop_focus_processing(year = 2016, state_code = '53', 
+                       radius_cir_crs_units = 1000)
+
+
+## state_raster_land_area_sum{year}_{state}.tif --> land area in meters per 1km circle
+## state_raster_land_area_ha_{year}_{state_code}.tif --> land area in hectares per 1km circle 
+
+## check the ha files
+land_ha <- rast('data/state_raster/land_area/2016/ha/state_raster_land_area_ha_2016_53.tif')
+pop_ha <- rast('data/state_raster/population_density/2016/ha/state_raster_land_area_ha_2016_53.tif')
+
+plot(land_ha)
+plot(pop_ha)
+
+```
+
+## Intersections & Edges ##
+```{r download edges}
+## update value for shutdown to pull from archives
+GOVT_SHUTDOWN <- TRUE
+source('tools/download_roads_edges.R')
+## udpate where to download to: 
+# where to download
+dldir <- file.path("data/gisdata/edges")
+
+download_edges(wa_fips = wa_fips, year = 2016)
+```
+
+```{r push edges to db}
+#source('tools/push_edges_to_db.R')
+source('tools/push_edges_to_pg.R')
+
+dsn = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432"
+
+years<-c(2016)
+states_fips <- '53'
+counties_fips <- counties_fips %>% filter(state_code == '53')
+
+f_create_schema()
+E()
+f_partitions_year()
+f_partitions_year_state()
+f_partitions_year_state_county()
+
+## check file / schema structures
+dbGetQuery(U, "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema = 'edges' order by table_schema, table_name;")
+ dbGetQuery(conn = U, statement = "SELECT table_schema, table_name FROM information_schema.tables where table_schema = 'edges_detail' order by table_schema, table_name;")
+
+f_upsert_shapefiles(year = 2016, conn = U, states_fips = states_fips)
+
+con_str = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432"
+## error -- constraint violation
+# look at tmp file: 
+edges_tmp <- st_read(con_str, query = 'SELECT * FROM tmp.edge')
+head(edges_tmp)
+
+# look at edge file format
+edges_file <- st_read(con_str, query = 'SELECT * FROM edges_state.edge_2016_53')
+head(edges_file)
+
+# chec, partition constraints
+dbGetQuery(U, statement = "SELECT * FROM pg_constraint;")
+
+dbGetQuery(U, statement = "SELECT * FROM pg_constraint c JOIN pg_class t ON c.conrelid = t.oid;")
+
+dbGetQuery(U, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'edge_2016_53_001';")
+dbGetQuery(U, "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'tmp';")
+
+
+## snapper tool (snap each edge to the endpoints?)
+f_snapper(conn = U)
+f_index(geomfield = 'geom', conn = U)
+
+edges_tbl <- st_read(con_str, query = 'SELECT * from edges_detail.edge_2016_wa_033')
+head(edges_tbl)
+
+## check for indices and gists: 
+sql <- "SELECT schemaname, tablename, indexname, indexdef FROM pg_indexes WHERE schemaname IN ('edges', 'edges_detail', 'edges_state') ORDER BY schemaname, tablename, indexname;"
+dbGetQuery(conn = U, statement = sql)
+
+```
+
+```{r create intersections}
+source('tools/create_intersection_buffers.R')
+build_endpoints(conn = U, year = 2016, state_abbr = 'wa')
+## check endpoints table
+build_intersections(conn = U, state_abbr = 'wa', year = 2016)
+### view WA intersection/endpoints table: 
+endpoints_tbl <- st_read(con_str, query = 'SELECT * from edges.endpoints_53_2016')
+head(endpoints_tbl)
+table(endpoints_tbl$mtfcc)
+
+## plot the endpoints to verify: 
+plot(endpoints_tbl)
+
+build_intersections(conn = U, year = 2016, state_abbr = 'wa')
+
+## check intersections table
+intersections_tbl <- st_read(con_str, query = 'SELECT * from edges.intersections_3plus_53_2016')
+intersections_tbl <- st_read(con_str, query = 'SELECT * from edges.intersections_3plus_53_2007')
+
+
+head(intersections_tbl)
+
+## tranform and map with leaflet
+intersections <- st_transform(intersections_tbl, 4326)
+
+##only plot for King county: 
+tract_county_tbl <- st_read(con_str, query = 'SELECT * from tract_nowater_county.tract_nowater_2016_53_033')
+king_county_shp <- st_union(tract_county_tbl)
+king_county_shp <- st_as_sf(data.frame(geometry = king_county_shp))
+county <- st_transform(king_county_shp, st_crs(intersections))
+intersections_in_county <- st_intersection(intersections, county)
+
+#map intersections
+leaflet(intersections_in_county) %>%
+  addTiles() %>%  # default OpenStreetMap tiles
+  addCircleMarkers(
+    radius = 3,                       # marker size
+    color = "red",                     # marker color
+    stroke = FALSE,                    # no border
+    fillOpacity = 0.4,                 # transparency
+    popup = ~paste("OID:", oid, "<br>",
+                   "Points:", n_points, "<br>",
+                   "Year:", year)
+  )
+
+## Look at some intersections: 
+# intersections %>% filter(oid == '318076')
+# edges_tbl %>% filter(tlid %in% c(187104515, 187110446, 187106283)) %>%
+#   leaflet() %>% addTiles() %>%
+#   addPolylines()
+```
+
+```{r rasterize intersections}
+source('tools/rasterize_state_intersections.R')
+con_str = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432"
+f_rasterize_intersections_0one(con_str = con_str, 
+                               conn = U, 
+                               state_fips = '53', year = 2016, 
+                               resolution_m = 100, verbose = TRUE, 
+                               state_filepath = 'data/state_raster/intersections')
+
+## preview raster data: 
+wa_intersections_r <- rast('data/state_raster/intersections/2016/raw/state_raster_intersection_buffer_2016_53.tif')
+head(wa_intersections_r)
+plot(wa_intersections_r)
+
+## get intersection density
+f_get_intersection_density(con_str = con_str, 
+                           conn = U, state_fips = '53', year = 2016)
+
+## show intersection density raster
+#preview intersection density - check max value
+intersect_density <- rast('data/state_raster/intersections/2016/ha/state_raster_intersection_density_2016_53.tif')
+plot(intersect_density)
+
+```
+
+
+## Business Density ####
+```{r separate business raster}
+source('tools/separate_wa_business_rasters.R')
+
+#check raster
+## preview raster data: 
+wa_business_r <- rast('data/state_raster/business/2016/sum/state_raster_business_density_2016_53.tif')
+head(wa_business_r)
+plot(wa_business_r)
+
+
+```
+```{r get business density}
+source('tools/get_business_density.R')
+f_get_business_density(state_fip = '53', year = 2016, verbose = TRUE)
+```
+
+## create validation points & buffers
+```{r create point buffer}
+source('tools/validate_smartmap_measures.R')
+f_create_validation_schema()
+con_str = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432"
+f_create_validation_points_df(state_fips = '53', con_str = con_str) ## update on the file to set different validation points
+f_create_validation_buffers(conn = U, state_fips = '53')
+f_validation_land_area(conn = U, year = 2016, state_fips = '53')
+
+# view table
+dbGetQuery(U, "SELECT * FROM validation.validation_points;")
+
+con_str = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432"
+val_points <- st_read(con_str, query = 'SELECT * from validation.validation_points')
+val_buffer <- st_read(con_str, query = glue('SELECT * from validation.buffers'))
+val_land <- st_read(con_str, query = ('SELECT * from validation.land_area'))
+head(val_points)
+head(val_buffer)
+head(val_land)
+
+val_points %>% leaflet() %>% addTiles() %>% addMarkers()
+
+# set active geometry for buffer
+st_geometry(val_buffer) <- val_buffer$geom_4326
+st_geometry(val_land) <- val_land$geom_4326
+# map points & buffers to check
+val_buffer %>% 
+  #dplyr::select(pid, geom_4326) %>% 
+  leaflet() %>% addTiles() %>% addPolygons(data = val_buffer, color = 'blue', weight = 1, fillOpacity = 0.3) %>%
+  addCircleMarkers(data = val_points, color = 'red', radius = 2, fillOpacity = 0.8, label = ~pid) %>%
+  addPolygons(data = val_land, color = 'darkviolet', fillOpacity = 0.5)
+```
+
+## Pull data for validation points
+```{r pull validation data}
+
+validate_result <- f_validate_smartwalk(dsn = con_str, year = 2016, state_fips = '53')
+
+# Show the table
+DT::datatable(validate_result$data %>% st_drop_geometry() %>%
+                dplyr::select(gid, smartmap_area_ha, buffer_area_ha, `% diff`, intersection_density_ha, pop_density_ha, bus_density_ha) %>% 
+                mutate(across(where(is.numeric), ~round(., 2)))
+              )
+
+```
+
+```{r show validate map}
+# Show the map
+validate_result$map
+```

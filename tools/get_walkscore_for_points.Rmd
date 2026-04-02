@@ -1,0 +1,310 @@
+---
+title: "Get data for points"
+author: "Amy Youngbloom"
+date: "2026-04-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+list.of.packages <- c('dplyr', 'glue', 'vctrs', 'DT', 'tidycensus', 'terra')
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+lapply(list.of.packages,function(x){library(x,character.only=TRUE)}) 
+library(glue)
+library('RPostgres')
+library(tidyr)
+## UPDATE Working directory
+wd <- 'H:/projects/beh_nwi_smartmap'
+setwd('H:/projects/beh_nwi_smartmap')
+getwd()
+source(glue('{wd}/tools/create_walkability_measures.R'))
+source(glue('{wd}/tools/walkdb_setup.R'))
+```
+
+# Lat-Long points 
+*upload .csv file of validation points (lat / lon) to working directory, update validation points filepath below to pull data for a list of points.* 
+
+```{r generate map and table validation, eval=TRUE, message = FALSE, warning = FALSE, echo = FALSE}
+invisible(
+  capture.output(
+    suppressMessages(
+    suppressWarnings({
+     # setwd('H:/projects/beh_nwi_smartmap')
+      smartwalk_results_2007 <- f_Smartmap_validation(con_str = dsn, conn = U, 
+                                  validation_points_filepath = 'H:/projects/beh_nwi_smartmap/validation_points.csv', 
+                                  year = 2007, 
+                                  state_fips = '53')
+
+      smartwalk_results_2016 <- f_Smartmap_validation(con_str = dsn, conn = U, 
+                                  validation_points_filepath = 'H:/projects/beh_nwi_smartmap/validation_points.csv', 
+                                  year = 2016, 
+                                  state_fips = '53')
+
+      smartwalk_results_2024 <- f_Smartmap_validation(con_str = dsn, conn = U, 
+                                  validation_points_filepath = 'H:/projects/beh_nwi_smartmap/validation_points.csv', 
+                                  year = 2024, 
+                                  state_fips = '53')
+      })
+    )
+    )
+  )
+
+```
+
+```{r combine smartmap validation results}
+full_smartmap_results <- merge(as.data.frame(smartwalk_results_2007$data), as.data.frame(smartwalk_results_2024$data), by = 'gid', suffixes = c('_2007', '_2024'))
+
+full_smartmap_results <- full_smartmap_results %>% 
+  dplyr::select(gid, walk_score_z_2007, walk_score_z_2024, intersection_density_ha_2007, intersection_density_ha_2024, 
+                bus_density_ha_2007, bus_density_ha_2024, pop_density_ha_2007, pop_density_ha_2024)
+
+```
+
+## Generate data table for validation points
+```{r print validation table, eval=TRUE, message=FALSE, echo = FALSE}
+ 
+smartmap_change_2007_2024 <- full_smartmap_results %>%
+  rowwise %>% 
+  mutate(change_pop_density = (pop_density_ha_2024 - pop_density_ha_2007), 
+         change_intersection_density = (intersection_density_ha_2024 - intersection_density_ha_2007),
+         change_busi_density = (bus_density_ha_2024 - bus_density_ha_2007)) %>%
+  mutate(change_pop_density_perc = (change_pop_density/pop_density_ha_2007)*100, 
+         change_intersection_density_perc = (change_intersection_density/intersection_density_ha_2007)*100, 
+         change_busi_density_perc = (change_busi_density/bus_density_ha_2007)*100
+  ) %>%
+  dplyr::select(gid, walk_score_z_2007, walk_score_z_2024, change_pop_density, change_intersection_density, change_busi_density, 
+                change_pop_density_perc, change_intersection_density_perc, change_busi_density_perc,
+                pop_density_ha_2024, intersection_density_ha_2024, bus_density_ha_2024)
+
+
+DT::datatable(full_smartmap_results %>% 
+                 dplyr::select('gid', walk_score_z_2007, walk_score_z_2024, pop_density_ha_2007, pop_density_ha_2024, 
+                               intersection_density_ha_2007, intersection_density_ha_2024, 
+                               bus_density_ha_2007, bus_density_ha_2024) %>%
+                dplyr::mutate(across(where(is.numeric), ~round(., 2))),
+              colnames = c('GID', 'Walk score (2007)', 'Walk score (2024)', 'Pop density (2007)', 'Pop density (2024)', 
+                           'Intersection density (2007)', 'Intersection density (2024)', 
+                           'Business density (2007)', 'Business density (2024)')
+                )
+
+DT::datatable(smartmap_change_2007_2024 %>% 
+                dplyr::select(gid, change_pop_density, change_intersection_density, change_busi_density) %>% 
+                dplyr::mutate(across(where(is.numeric), ~round(., 2))), 
+              colnames = c('GID', 'Change in pop density', 'Change in intersection density', 'Change in business density'), 
+              rownames = FALSE)
+
+DT::datatable(smartmap_change_2007_2024 %>% 
+                dplyr::select(gid, change_pop_density_perc, change_intersection_density_perc, change_busi_density_perc) %>%
+                dplyr::mutate(across(where(is.numeric), ~round(., 2))), 
+              colnames = c('GID', 'Change in pop density (%)', 'Change in intersection density (%)', 'Change in business density (%)'), 
+              rownames = FALSE)
+
+
+```
+
+```{r merge change back with geo data, echo = FALSE}
+change_results <- merge(smartwalk_results_2024$data %>%
+                       dplyr::select(gid, smartmap_area_ha, intersection_density_ha, bus_density_ha, pop_density_ha),
+                     smartmap_change_2007_2024, 
+                     by = c('gid'), 
+                     all.x=TRUE)  %>%
+                         dplyr::mutate(across(where(is.numeric), ~round(., 2)))
+
+max_pop <- max(abs(change_results$change_pop_density_perc), na.rm=TRUE)
+pal_pop <- leaflet::colorNumeric(
+  palette = "RdBu",
+  domain  = c(-max_pop, max_pop), ## create symmetry
+  na.color = "transparent"
+)
+
+## Population change map ##
+map_results_pop_change <- 
+  leaflet() %>%
+  addTiles () %>%
+  addPolygons(
+    data = change_results,
+    fillColor = ~pal_pop(change_pop_density_perc), 
+    fillOpacity = 0.7, 
+    color = 'grey', 
+    weight = 0.5, 
+    opacity = 1, 
+    popup = ~paste0(
+       "<strong> ID:</strong> ", gid, "<br>",
+        "<strong>Change %:</strong> ", change_pop_density_perc
+     )
+    ) %>%
+  addControl(
+    html = "<h3>Population Density Change (2007 to 2024)</h3>", 
+    position = 'topright'
+  )%>%
+  addLegend(
+    pal = pal_pop,
+    values = change_results$change_pop_density_perc,
+    title = "Change %, 2007 to 2024",
+    opacity = 0.7
+  )
+
+max_inter <- max(abs(change_results$change_intersection_density_perc), na.rm=TRUE)
+pal_inter <- leaflet::colorNumeric(
+  palette = "RdBu",
+  domain  = c(-max_inter, max_inter),
+  na.color = "transparent"
+)
+
+
+## intersection change map ##
+map_results_inter_change <- 
+  leaflet() %>%
+  addTiles () %>%
+  addPolygons(
+    data = change_results,
+    fillColor = ~pal_inter(change_intersection_density_perc), 
+    fillOpacity = 0.7, 
+    color = 'grey', 
+    weight = 0.5, 
+    opacity = 1, 
+    popup = ~paste0(
+       "<strong> ID:</strong> ", gid, "<br>",
+        "<strong>Change %:</strong> ", change_intersection_density_perc
+     )    )%>%
+   addControl(
+    html = "<h3>Intersection Density Change (2007 to 2024)</h3>", 
+    position = 'topright'
+  )%>%
+  addLegend(
+    pal = pal_inter,
+    values = change_results$change_intersection_density_perc,
+    title = "Change %, 2007 to 2024",
+    opacity = 0.7
+  )
+
+
+max_busi <- max(abs(change_results$change_busi_density_perc), na.rm=TRUE)
+pal_busi <- leaflet::colorNumeric(
+  palette = "RdBu",
+  domain  = c(-max_busi, max_busi),
+  na.color = "transparent"
+)
+
+
+## business change map ##
+map_results_busi_change <- 
+  leaflet() %>%
+  addTiles () %>%
+  addPolygons(
+    data = change_results,
+    fillColor = ~pal_busi(change_busi_density_perc), 
+    fillOpacity = 0.7, 
+   # color = 'grey', 
+    weight = 0.5, 
+    opacity = 1, 
+      popup = ~paste0(
+       "<strong>ID:</strong> ", gid, "<br>",
+        "<strong>Change %:</strong> ", change_busi_density_perc
+     )
+    )%>%
+   addControl(
+    html = "<h3>Business Density Change (2007 to 2024)</h3>", 
+    position = 'topright'
+  )%>%
+  addLegend(
+    pal = pal_busi,
+    values = change_results$change_busi_density_perc,
+    title = "Change %, 2007 to 2024",
+    opacity = 0.7
+  )
+
+
+
+
+```
+
+## Map validation points
+```{r map validation results, fig.width = 800}
+library(leafsync)
+leafsync::sync(map_results_pop_change, 
+               map_results_inter_change,
+               map_results_busi_change,
+               ncol = 1)
+```
+
+## Map walkscore
+```{r map walkscore values}
+max_walk <- max(abs(smartwalk_results_2007$data$walk_score_z), na.rm=TRUE)
+
+pal_walk <- leaflet::colorNumeric(
+  palette = "RdBu",
+  domain  = c(-max_walk, max_walk), ## create symmetry
+  na.color = "transparent"
+)
+
+map_results_walkscore_2007 <- leaflet() %>%
+  addTiles () %>%
+  addPolygons(
+    data = smartwalk_results_2007$data,
+    fillColor = ~pal_walk(walk_score_z), 
+    fillOpacity = 0.7, 
+   # color = 'grey', 
+    weight = 0.5, 
+    opacity = 1, 
+      popup = ~paste0(
+       "<strong>ID:</strong> ", gid, "<br>",
+        "<strong>Change %:</strong> ", walk_score_z
+     )
+    )%>%
+   addControl(
+    html = "<h3> Composite Walk Score (2007)</h3>", 
+    position = 'topright'
+  )%>%
+  addLegend(
+    pal = pal_walk,
+    values = smartwalk_results_2007$data$walk_score_z,
+    title = "Composite walk score (2007)",
+    opacity = 0.7
+  )
+
+max_walk <- max(abs(smartwalk_results_2024$data$walk_score_z), na.rm=TRUE)
+
+pal_walk <- leaflet::colorNumeric(
+  palette = "RdBu",
+  domain  = c(-max_walk, max_walk), ## create symmetry
+  na.color = "transparent"
+)
+
+map_results_walkscore_2024 <- leaflet() %>%
+  addTiles () %>%
+  addPolygons(
+    data = smartwalk_results_2024$data,
+    fillColor = ~pal_walk(walk_score_z), 
+    fillOpacity = 0.7, 
+   # color = 'grey', 
+    weight = 0.5, 
+    opacity = 1, 
+      popup = ~paste0(
+       "<strong>ID:</strong> ", gid, "<br>",
+        "<strong> Walk score:</strong> ", walk_score_z
+     )
+    )%>%
+   addControl(
+    html = "<h3> Composite Walk Score (2024)</h3>", 
+    position = 'topright'
+  )%>%
+  addLegend(
+    pal = pal_walk,
+    values = smartwalk_results_2024$data$walk_score_z,
+    title = "Composite walk score (2024)",
+    opacity = 0.7
+  )
+
+```
+
+
+
+```{r print walk score maps}
+leafsync::sync(map_results_walkscore_2007, 
+               map_results_walkscore_2024,
+               ncol = 1)
+
+```

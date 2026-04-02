@@ -1,0 +1,672 @@
+---
+title: "NWI Troubleshooting: Check Intersection & Business Density"
+date: "2025-12-10"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.width = 8, 
+                      fig.height = 6)
+setwd('H:/projects/beh_nwi_smartmap')
+source('dbconnect.R')
+source('tools/get_map_template_functions.R')
+library(sf)
+library(leaflet)
+library(terra)
+library(glue)
+# connect to database & set dsn
+U <- us_census <- connectdb()
+con_str = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432" 
+
+```
+
+*ISSUE: Final intersection and business density maps extent beyond land and show high values of density in water areas just off the shore.* 
+
+*Check map projections and calculations and trim maps*
+
+```{r get king county template}
+invisible(
+  capture.output(
+    suppressMessages(
+    suppressWarnings({
+king_template <- tigris::counties(state = 'WA') 
+king_template <- king_template %>% 
+  dplyr::filter(COUNTYFP == '033')
+King_template_26910 <- st_transform(king_template, 26910)
+})
+)))
+
+```
+
+## Mapping Endpoints 
+*Mapped all endpoints (yellow), intersections (3+ endpoints meeting; red) & polyline data (roads/paths; blue)*
+
+*Data pulled from nwi_smartmap database to map intersection endpoints*
+
+*Pull in line/edges data to show all roads/paths*
+
+*Verify that intersections are mapping correctly on map*
+
+```{r endpoints 2007}
+invisible(
+  capture.output(
+    suppressMessages(
+    suppressWarnings({
+
+# get endpoints, filter to King county
+endpoints_tbl_2007 <- st_read(con_str, query = 'SELECT * from edges.endpoints_53_2007')
+endpoints_filter_2007 <- st_filter(endpoints_tbl_2007, King_template_26910)
+
+# get edges and filter to local roads/paths 
+edges_2007 <- st_read('H:/projects/beh_nwi_smartmap/gisdata/us_census/edges/fe_2007_53033_edges.shp')
+edges_2007 <- edges_2007 %>%
+  dplyr::filter(startsWith(MTFCC, "S")) %>% 
+  dplyr::filter(!(MTFCC %in% c('S1100', 'S1500', 'S1630', 'S1640', 'S1730', 'S1750', 'S1780')))
+
+# get intersections (3+ end/start points of lines)
+intersections_3plus_tbl_2007 <- st_read(con_str, query = 'SELECT * from edges.intersections_3plus_53_2007') %>% 
+  dplyr::select(-geom_snap_buffer_26910)
+intersections_filter_2007 <- st_filter(intersections_3plus_tbl_2007, King_template_26910) 
+intersections_4326_2007 <- st_transform(intersections_filter_2007, 4326)
+
+# transform for leaflet map
+endpoints_4326_2007 <- st_transform(endpoints_filter_2007, 4326)
+edges_4326_2007 <- st_transform(edges_2007, 4326)
+
+# save .shp files for mapping
+st_write(edges_4326_2007, 'H:/projects/beh_nwi_smartmap/intersection_qa_files/edges_4326_2007.shp', append = FALSE)
+st_write(intersections_4326_2007 %>% dplyr::select(-tlid), 'H:/projects/beh_nwi_smartmap/intersection_qa_files/intersections_4326_2007.shp', append = F)
+st_write(endpoints_4326_2007, 'H:/projects/beh_nwi_smartmap/intersection_qa_files/endpoints_4326_2007.shp', append = F)
+
+
+endpoints_intersections_map_2007 <- leaflet() %>%
+  addTiles() %>%
+        ## add roads & paths
+        addPolylines(
+          data = edges_4326_2007, 
+          color = 'steelblue', 
+          weight = 3, 
+          opacity= 0.7,
+          popup = ~paste('MTFCC: ', MTFCC)
+                     ) %>%
+      # add endpoints
+  # addCircleMarkers(
+  #         data = endpoints_4326_2007,
+  #         radius = 2, 
+  #         fillColor = 'yellow', 
+  #         fillOpacity = 0.7, 
+  #         stroke = FALSE, 
+  #         popup = ~paste0("tlid; mtfcc: ", tlid, "; ", mtfcc),
+  #         clusterOptions = markerClusterOptions()) %>%
+  addCircleMarkers(
+    data = intersections_4326_2007,
+          radius = 10, 
+          fillColor = 'red', 
+          fillOpacity = 0.7, 
+          stroke = FALSE, 
+          popup = ~paste0("tlids: ", tlid),
+         clusterOptions = markerClusterOptions()
+      #group = 'intersections'
+    ) %>%
+  addLegend(
+    position = "bottomright",
+    title = "Map Features",
+    colors = c("steelblue", #"yellow", 
+               "red"),
+    labels = c("Roads / Paths", #"All endpoints", 
+               "Intersections (3+ endpoints)"),
+    opacity = 1
+  )# %>%
+# groupOptions(group = 'intersections', zoom = 14)
+
+  
+    })
+    )
+    )
+  )
+
+```
+```{r endpoints 2016}
+setwd('H:/projects/beh_nwi_smartmap')
+
+invisible(
+  capture.output(
+    suppressMessages(
+    suppressWarnings({
+
+# get endpoints, filter to King county
+endpoints_tbl_2016 <- st_read(con_str, query = 'SELECT * from edges.endpoints_53_2016')
+endpoints_filter_2016 <- st_filter(endpoints_tbl_2016, King_template_26910)
+
+# get edges and filter to local roads/paths 
+edges_2016 <- st_read('H:/projects/beh_nwi_smartmap/gisdata/us_census/edges/tl_2016_53033_edges.shp')
+edges_2016 <- edges_2016 %>%
+  dplyr::filter(startsWith(MTFCC, "S")) %>%
+ dplyr::filter(!(MTFCC %in% c('S1100', 'S1500', 'S1630', 'S1640', 'S1730', 'S1750', 'S1780')))
+
+# get intersections (3+ end/start points of lines)
+intersections_3plus_tbl_2016 <- st_read(con_str, query = 'SELECT * from edges.intersections_3plus_53_2016') %>% 
+  dplyr::select(-geom_snap_buffer_26910)
+intersections_filter_2016 <- st_filter(intersections_3plus_tbl_2016, King_template_26910) 
+intersections_4326_2016 <- st_transform(intersections_filter_2016, 4326)
+
+# transform for leaflet map
+endpoints_4326_2016 <- st_transform(endpoints_filter_2016, 4326)
+edges_4326_2016 <- st_transform(edges_2016, 4326)
+
+# save .shp files for mapping
+st_write(edges_4326_2016, 'H:/projects/beh_nwi_smartmap/intersection_qa_files/edges_4326_2016.shp', append = FALSE)
+st_write(intersections_4326_2016 %>% dplyr::select(-tlid), 'H:/projects/beh_nwi_smartmap/intersection_qa_files/intersections_4326_2016.shp', append = FALSE)
+st_write(endpoints_4326_2016, 'H:/projects/beh_nwi_smartmap/intersection_qa_files/endpoints_4326_2016.shp', append = FALSE)
+
+endpoints_intersections_map_2016 <- leaflet() %>%
+  addTiles() %>%
+        ## add roads & paths
+        addPolylines(
+          data = edges_4326_2016, 
+          color = 'steelblue', 
+          weight = 3, 
+          opacity= 0.7,
+          popup = ~paste('MTFCC: ', MTFCC)
+                     ) %>%
+      # add endpoints
+  # addCircleMarkers(
+  #         data = endpoints_4326,
+  #         radius = 2, 
+  #         fillColor = 'yellow', 
+  #         fillOpacity = 0.7, 
+  #         stroke = FALSE, 
+  #         popup = ~paste0("tlid; mtfcc: ", tlid, "; ", mtfcc),
+  #         clusterOptions = markerClusterOptions()) %>%
+  addCircleMarkers(
+    data = intersections_4326_2016,
+          radius = 10, 
+          fillColor = 'red', 
+          fillOpacity = 0.7, 
+          stroke = FALSE, 
+          popup = ~paste0("tlids: ", tlid),
+          clusterOptions = markerClusterOptions()
+         # group = 'intersections'
+          ) %>%
+  addLegend(
+    position = "bottomright",
+    title = "Map Features",
+    colors = c("steelblue", #"yellow", 
+               "red"),
+    labels = c("Roads / Paths", #"All endpoints", 
+               "Intersections (3+ endpoints)"),
+    opacity = 1
+  )# %>%
+#groupOptions(group = 'intersections', zoom = 14)
+
+  
+    })
+    )
+    )
+  )
+
+```
+```{r endpoints 2024}
+setwd('H:/projects/beh_nwi_smartmap')
+
+invisible(
+  capture.output(
+    suppressMessages(
+    suppressWarnings({
+
+# get endpoints, filter to King county
+endpoints_tbl_2024 <- st_read(con_str, query = 'SELECT * from edges.endpoints_53_2024')
+endpoints_filter_2024 <- st_filter(endpoints_tbl_2024, King_template_26910)
+
+# get edges and filter to local roads/paths 
+edges_2024 <- st_read('H:/projects/beh_nwi_smartmap/gisdata/us_census/edges/tl_2024_53033_edges.shp')
+edges_2024 <- edges_2024 %>%
+  dplyr::filter(startsWith(MTFCC, "S")) %>%
+ dplyr::filter(!(MTFCC %in% c('S1100', 'S1500', 'S1630', 'S1640', 'S1730', 'S1750', 'S1780')))
+
+# get intersections (3+ end/start points of lines)
+intersections_3plus_tbl_2024 <- st_read(con_str, query = 'SELECT * from edges.intersections_3plus_53_2024') %>% 
+  dplyr::select(-geom_snap_buffer_26910)
+intersections_filter_2024 <- st_filter(intersections_3plus_tbl_2024, King_template_26910) 
+intersections_4326_2024 <- st_transform(intersections_filter_2024, 4326)
+
+# transform for leaflet map
+endpoints_4326_2024 <- st_transform(endpoints_filter_2024, 4326)
+edges_4326_2024 <- st_transform(edges_2024, 4326)
+
+# save .shp files for mapping
+st_write(edges_4326_2024, 'H:/projects/beh_nwi_smartmap/intersection_qa_files/edges_4326_2024.shp', append = F)
+st_write(intersections_4326_2024 %>% dplyr::select(-tlid), 'H:/projects/beh_nwi_smartmap/intersection_qa_files/intersections_4326_2024.shp',append = F)
+st_write(endpoints_4326_2024, 'H:/projects/beh_nwi_smartmap/intersection_qa_files/endpoints_4326_2024.shp', append = F)
+
+endpoints_intersections_map_2024 <- leaflet() %>%
+  addTiles() %>%
+        ## add roads & paths
+        addPolylines(
+          data = edges_4326_2024, 
+          color = 'steelblue', 
+          weight = 3, 
+          opacity= 0.7,
+          popup = ~paste('MTFCC: ', MTFCC)
+                     ) %>%
+      # add endpoints
+  # addCircleMarkers(
+  #         data = endpoints_4326,
+  #         radius = 2, 
+  #         fillColor = 'yellow', 
+  #         fillOpacity = 0.7, 
+  #         stroke = FALSE, 
+  #         popup = ~paste0("tlid; mtfcc: ", tlid, "; ", mtfcc),
+  #         clusterOptions = markerClusterOptions()) %>%
+  addCircleMarkers(
+    data = intersections_4326_2024,
+          radius = 10, 
+          fillColor = 'red', 
+          fillOpacity = 0.7, 
+          stroke = FALSE, 
+          popup = ~paste0("tlids: ", tlid),
+          clusterOptions = markerClusterOptions()
+         # group = 'intersections'
+          ) %>%
+  addLegend(
+    position = "bottomright",
+    title = "Map Features",
+    colors = c("steelblue", #"yellow", 
+               "red"),
+    labels = c("Roads / Paths", #"All endpoints", 
+               "Intersections (3+ endpoints)"),
+    opacity = 1
+  )# %>%
+#groupOptions(group = 'intersections', zoom = 14)
+
+  
+    })
+    )
+    )
+  )
+```
+
+## Map of edges and lines, 2007
+```{r print maps for 2007}
+leafsync::sync(
+  endpoints_intersections_map_2007, 
+              endpoints_intersections_map_2024, 
+              ncol = 1)
+```
+## Map of edges and lines, 2024
+```{r print maps for 2024}
+
+endpoints_intersections_map_2024
+
+```
+
+
+## Map with overlapping 2007 and 2024 lines
+```{r identify overlapping lines and intersections, eval = FALSE}
+lines_overlapping <- st_intersection(edges_4326_2007, edges_4326_2024)
+points_overlapping <- st_intersection(intersections_4326_2007, intersections_4326_2024)
+
+lines_2007_only <- st_difference(edges_4326_2007, st_union(lines_overlapping))
+lines_2024_only <- st_difference(edges_4326_2024, st_union(lines_overlapping))
+
+```
+
+
+```{r map overlapping lines}
+ full_lines_map <- leaflet() %>%
+  addTiles() %>%
+        ## add roads & paths
+        addPolylines(
+          data = edges_4326_2007, 
+          color = 'steelblue', 
+          weight = 3, 
+          opacity= 0.5,
+          popup = ~paste('MTFCC: ', MTFCC)
+                     ) %>%
+  addCircleMarkers(
+    data = intersections_4326_2007,
+          radius = 10, 
+          fillColor = 'darkblue', 
+          fillOpacity = 0.5, 
+          stroke = FALSE, 
+          popup = ~paste0("tlids: ", tlid),
+         clusterOptions = markerClusterOptions()
+    ) %>%
+  ## Add 2024 data
+   addTiles() %>%
+        ## add roads & paths
+        addPolylines(
+          data = edges_4326_2024, 
+          color = 'red', 
+          weight = 3, 
+          opacity= 0.8,
+          popup = ~paste('MTFCC: ', MTFCC)
+                     ) %>%
+  addCircleMarkers(
+    data = intersections_4326_2024,
+          radius = 10, 
+          fillColor = 'darkred', 
+          fillOpacity = 0.8, 
+          stroke = FALSE, 
+          popup = ~paste0("tlids: ", tlid),
+         clusterOptions = markerClusterOptions()
+    ) %>%
+  addLegend(
+    position = "bottomright",
+    title = "Map Features",
+    colors = c("steelblue", 
+               'darkblue',
+               "red", 
+               'darkred'),
+    labels = c("Roads / Paths (2007)", 
+               "Intersections (2007)", 
+               "Roads / Paths (2024)", 
+               'Intersections (2024)'),
+    opacity = 1
+  )# %>%
+
+```
+
+
+```{r print combined map}
+full_lines_map
+
+```
+
+## Map Intersections as raster & point data
+*Intersections defined as 3 or more endpoints meeting*
+
+*Convert intersection buffer polygons to raster data with a count of overlapping intersection buffers per cell (cell = 1 hectare)*
+
+*Data represents the total number of overlapping intersection buffers (1km) per cell (i.e., how many intersections within 1km of the cell)*
+
+*NOTE: current rasterization method only counts buffers overlapping the centroid of the cell - need to figure out how to include buffers that touch the corners/edges of the cell as well?*
+
+```{r get state raster, eval = FALSE}
+invisible(
+  capture.output(
+    suppressMessages( 
+    suppressWarnings({
+
+state_file_raster <- rast(glue('H:/projects/beh_nwi_smartmap/data/state_raster/land_area/2007/raw/state_raster_raw_2007_53.tif'))
+
+# crop to King County
+#shp <- project(shp, crs(r))   # CRS match - already matches: 26910
+r_crop <- crop(state_file_raster, King_template_26910)        # fast bounding box
+r_mask <- mask(r_crop,  King_template_26910)   # exact polygon mask
+
+## recalculate intersection raster file
+# bounding box
+bbox <- ext(r_mask)
+bbox <- st_bbox(bbox)
+  
+  xmin <- bbox['xmin']
+  ymin <- bbox['ymin']
+  xmax <- bbox['xmax']
+  ymax <- bbox['ymax']
+
+# get intersection buffer shps: 
+intersections_3plus_buffer <- st_read(con_str, query = 'SELECT * from edges.intersections_3plus_53_2007')
+
+intersections_3plus_buffer <- intersections_3plus_buffer %>% 
+  st_set_geometry('geom_snap_buffer_26910') %>%
+  dplyr::select(-geom_snap_26910) 
+
+# filter to King county
+intersections_filter <- st_filter(intersections_3plus_buffer, King_template_26910)
+
+# define output raster
+r_template <- rast(ext(c(xmin, xmax, ymin, ymax)), 
+           res = 100, 
+            crs = st_crs(intersections_filter)$wkt)
+
+# add constant field
+intersections_filter$intersection_density <- 1
+  
+r_out <- rasterize(vect(intersections_filter), r_template, field = 'intersection_density', 
+                     fun = 'sum', background = NA)
+r_out[r_mask == 0]<-NA
+
+
+# crop raster file to land only
+intersection_centroid <- st_centroid(intersections_filter)
+
+intersections_4326 <- st_transform(intersection_centroid, 4326)
+rast_4326 <- project(r_out, "EPSG:4326")
+
+# get old intersection density raster data
+intersections_ha_filepath = glue('H:/projects/beh_nwi_smartmap/data/state_raster/intersections/2007/ha/state_raster_intersection_density_2007_53.tif')
+intersections_ha <- rast(intersections_ha_filepath)
+
+# sum intersections per 1km
+raw_raster_map <- leaflet() %>%
+  addTiles() %>%
+   addCircleMarkers(data = intersections_4326,
+                   radius = 2,
+                   color = "blue",
+                   fill = TRUE,
+                   fillOpacity = 0.5,
+                   popup = ~oid, clusterOptions = markerClusterOptions()) %>%
+ addRasterImage(
+    rast_4326,
+    colors = rev(terrain.colors(100)),
+    opacity = 0.7
+  ) %>%
+  addLegend(
+    pal = colorNumeric(rev(terrain.colors(100)), values(rast_4326), na.color = "transparent"),
+    values = values(rast_4326),
+    title = "Rasterized raw intersections"
+  )
+  
+}))
+))
+```
+
+```{r print raster map, eval = FALSE}
+raw_raster_map
+```
+
+## Check land density raster files
+*Verify land density - raw, sum, ha files for land constraints (Should be showing land only)*
+
+*Raw land data has 0 values for water (not NA)*
+
+*FIXED: land sum (sum of cells in 1km buffer with land) had 'halo' effect, where cells in the water were being calculated as the total number of cells in the 1km buffer with land. Updated this to exclude any cells with a 0 value in the raw land file (i.e., water cells) to avoid intersection and business density being calculated for these cells*
+
+
+```{r land density, eval = FALSE}
+# import land area rasters
+land_area_raw <- glue('H:/projects/beh_nwi_smartmap/data/state_raster/land_area/2007/raw/state_raster_raw_2007_53.tif')
+land_area_ha <- glue('H:/projects/beh_nwi_smartmap/data/state_raster/land_area/2007/ha/state_raster_land_area_ha_2007_53.tif')
+
+l_raw<-rast(land_area_raw) # crs already 26910
+l_ha <- rast(land_area_ha) # crs already 26910
+
+# filter to King County
+l_raw_crop <- crop(l_raw, King_template_26910)
+l_raw_mask <- mask(l_raw_crop, King_template_26910)
+#l_raw_mask[l_raw==0]<-NA
+l_raw_4326 <- project(l_raw_mask, 'EPSG:4326')
+
+# get sum of cells in 1km circle for each cell (density sum): 
+cell_area_m2 <- res(l_raw_mask)[1]*res(l_raw_mask)[2] # cell area = 10,000 m (which is 1 hect)
+w <- focalMat(l_raw_mask, type = 'circle', d= 1000) # create focal mat for 1 km circle
+w[w>0] <- 1
+
+l_sum <- focal(l_raw_mask, w, fun = 'sum', na.policy = 'omit', na.rm=TRUE)
+l_sum[l_raw_mask == 0]<-NA
+l_sum_4326 <- project(l_sum, 'EPSG: 4326')
+
+
+l_ha_crop <- crop(l_ha, King_template_26910)
+l_ha_mask <- mask(l_ha_crop, King_template_26910)
+l_ha_mask[l_raw_mask == 0]<-NA
+l_ha_4326 <- project(l_ha_mask, 'EPSG:4326')
+
+# map rasters: 
+map_raw <-leaflet() %>%
+  addTiles() %>%
+  addRasterImage(
+    l_raw_4326,
+    colors = rev(terrain.colors(100)),
+    opacity = 0.7
+  ) %>% 
+  addLegend(
+    pal = colorNumeric(rev(terrain.colors(100)), values(l_raw_4326), na.color = "transparent"),
+    values = values(l_raw_4326),
+    title = "Raw land area raster"
+  )
+  
+map_sum <-leaflet() %>%
+  addTiles() %>%
+  addRasterImage(
+    l_sum_4326,
+    colors = rev(terrain.colors(100)),
+    opacity = 0.7
+  ) %>% 
+  addLegend(
+    pal = colorNumeric(rev(terrain.colors(100)), values(l_sum_4326), na.color = "transparent"),
+    values = values(l_sum_4326),
+    title = "Land area density"
+  )
+
+## NOTE: Because the resolution is 100 m per cell, the cell is already the size of a hectare, so the sum and hectare datasets are the same. 
+map_ha <-leaflet() %>%
+  addTiles() %>%
+  addRasterImage(
+    l_ha_4326,
+    colors = rev(terrain.colors(100)),
+    opacity = 0.7
+  ) %>%
+  addLegend(
+    pal = colorNumeric(rev(terrain.colors(100)), values(l_ha_4326), na.color = "transparent"),
+    values = values(l_ha_4326),
+    title = "Land area (hectares) per km"
+  )
+
+
+```
+### Raw land area (value = 1 for land, value = 0 for water)
+```{r print maps, eval = FALSE}
+map_raw
+```
+
+### Land density (Total hectares of land in 1km radial buffer area). 
+```{r print land density map, eval = FALSE}
+map_sum
+```
+
+## Rerun Intersection density
+*Re-calculate intersection density for King County only*
+
+*Main issue related to the land density file retaining land density values for water cells near land (counting the land area)* 
+```{r intersection density, eval = FALSE}
+intersection_raster <- r_out
+land_area_raster <- l_ha_mask ## note that 0 values are NA here --
+
+# calculate density per hectare
+intersection_density <- r_out/l_ha_mask
+
+# change projection for mapping
+intersection_density_4326 <- project(intersection_density, 'EPSG:4326')
+
+intersection_density_map_new <-
+  leaflet() %>%
+  addTiles() %>%
+ 
+ addRasterImage(
+    intersection_density_4326,
+    colors = rev(terrain.colors(100)),
+    opacity = 0.7
+  ) %>%
+  addLegend(
+    pal = colorNumeric(rev(terrain.colors(100)), values(intersection_density_4326), na.color = "transparent"),
+    values = values(intersection_density_4326),
+    title = "Rasterized intersection density"
+  )
+
+# print map
+intersection_density_map_new
+
+```
+
+## Check business density data
+*Business density fixed with the updated land density file*
+```{r Business density rasters, eval = FALSE}
+business_2007_file <- rast('H:/projects/beh_nwi_smartmap/data/state_raster/business/2007/sum/state_raster_business_density_2007_53.tif')
+
+# filter to King County
+# filter to King County
+business_density_crop <- crop(business_2007_file, King_template_26910)
+business_density_mask <- mask(business_density_crop, King_template_26910)
+
+# get projection for plotting
+business_density_4326 <- project(business_density_mask, 'EPSG:4326')
+
+# get land area for trimming:
+business_density_resample <- resample(business_density_4326, l_raw_4326, method = 'bilinear')
+business_density_resample[l_raw_4326 == 0]<-NA
+
+# plot the data
+business_density_map <- leaflet() %>% 
+  addTiles() %>%
+  addRasterImage(
+    business_density_4326,
+    colors = rev(terrain.colors(100)),
+    opacity = 0.7
+  ) %>% 
+  addLegend(
+    pal = colorNumeric(rev(terrain.colors(100)), values(business_density_4326), na.color = "transparent"),
+    values = values(business_density_4326),
+    title = "Total businessness within 1km"
+  )
+
+business_density_map2 <- leaflet() %>% 
+  addTiles() %>%
+  addRasterImage(
+    business_density_resample,
+    colors = rev(terrain.colors(100)),
+    opacity = 0.7
+  ) %>% 
+  addLegend(
+    pal = colorNumeric(rev(terrain.colors(100)), values(business_density_resample), na.color = "transparent"),
+    values = values(business_density_resample),
+    title = "Total businessness within 1km"
+  )
+
+business_density_map2
+```
+
+### Get business density per hectare
+```{r business density per hectare, eval = FALSE}
+
+r_bus_resample <- resample(business_density_mask, l_ha_mask, method='bilinear')
+r_bus_resample[l_ha_mask == 0] <- NA
+r_bus_resample_4326 <- project(r_bus_resample, 'EPSG:4326')
+r_bus_resample_4326[l_raw_4326 == 0] <- NA
+
+business_density_map <- leaflet() %>% 
+  addTiles() %>%
+  addRasterImage(
+    #l_ha_4326,
+    r_bus_resample_4326,
+    colors = rev(terrain.colors(100)),
+    opacity = 0.7
+  ) %>% 
+  addLegend(
+    pal = colorNumeric(rev(terrain.colors(100)), values(r_bus_resample_4326), na.color = "transparent"),
+    values = values(r_bus_resample_4326),
+    title = "Total businessness per hectare"
+  )
+
+business_density_map
+
+```

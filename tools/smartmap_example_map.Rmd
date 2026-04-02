@@ -1,0 +1,469 @@
+---
+title: "Example Walk Measure Map"
+date: "2025-11-19"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = FALSE, 
+                      warning = FALSE, 
+                      message = FALSE)
+library(terra)
+setwd('H:/projects/beh_nwi_smartmap')
+source('tools/get_map_template_functions.R')
+source('tools/validate_smartmap_measures.R')
+con_str = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432"
+```
+## Set county and years
+```{r example settings, echo = TRUE,eval = TRUE}
+year_template <- 2016
+year_one <- 2007
+year_two <- 2024
+
+county_name = 'King County'
+```
+```{r setup template, eval = TRUE}
+invisible(
+  capture.output(
+    suppressMessages(
+    suppressWarnings({
+        shp_county_template <- get_county_template(county = 'King County', year = year_template)
+    })
+    )
+    )
+  )
+
+
+```
+```{r get cropped raster, eval = TRUE}
+ha_cropped_rast_2007 <- crop_ha_files(year = year_one, 
+                                 county_template = shp_county_template)
+
+ha_cropped_rast_2024 <- crop_ha_files(year = 2024, 
+                                      county_template = shp_county_template)
+
+invisible(
+  capture.output(
+    suppressMessages(
+    suppressWarnings({
+king_template <- tigris::counties(state = 'WA') 
+king_template <- king_template %>% 
+  dplyr::filter(COUNTYFP == '033')
+King_template_26910 <- st_transform(king_template, 26910)
+    })
+)
+)
+)
+
+```
+## Population density maps
+```{r pop density maps}
+pop_2007 <- ha_cropped_rast_2007[[1]]
+pop_2024 <- ha_cropped_rast_2024[[1]]
+
+pal <- colorNumeric(c('white', 'cyan4', "#0C2C84"), values(pop_2024),
+  na.color = "transparent")
+
+pop_2007_map<-leaflet() %>%
+  addTiles() %>%
+  addRasterImage(pop_2007, colors = pal, opacity = 0.75) %>%
+  addLegend(pal = pal, values = values(pop_2007), title = 'Pop density , 2007')
+
+pal <- colorNumeric(c('white', 'cyan4', "#0C2C84"), values(pop_2024),
+  na.color = "transparent")
+
+pop_2024_map<-leaflet() %>%
+  addTiles() %>%
+  addRasterImage(pop_2024, colors = pal, opacity = 0.75) %>%
+  addLegend(pal = pal, values = values(pop_2007), title = 'Pop density , 2024')
+
+```
+### People per hectare (for 1km radius area)
+```{r print pop maps, fig.width=800}
+library(leafsync)
+leafsync::sync(pop_2007_map, 
+               pop_2024_map)
+```
+### Change in people per hactare (for 1km radius area)
+```{r get change in pop density}
+# get overlapping extents only
+
+pop_2024_aligned <- terra::resample(pop_2024, pop_2007, method = 'bilinear')
+pop_density_change = pop_2024_aligned - pop_2007
+#pop_density_change$focal_sum[is.na(pop_density_change$focal_sum)] <- 0
+
+shp_county_26910 <- st_transform(shp_county_template, st_crs(pop_density_change))
+pop_density_change_mask <- mask(pop_density_change, shp_county_26910)
+
+```
+```{r map population change}
+pop_density_change_mask <- as.numeric(pop_density_change_mask)
+NAflag(pop_density_change_mask) <- NA
+eps <- 0.01
+
+pop_density_change_mask <- ifel(
+  abs(pop_density_change_mask) <= eps,
+  NA,
+  pop_density_change_mask
+)
+
+max_pop <- global(pop_density_change_mask, fun = 'max', na.rm=TRUE)$max
+pal <- colorNumeric(
+  palette = "RdBu",
+  domain  = c(-max_pop, max_pop), ## create symmetry
+  na.color = "transparent"
+)
+
+
+leaflet() %>%
+  addTiles() %>%
+  addRasterImage(pop_density_change_mask, colors = pal, opacity = 0.75) %>%
+  addLegend(pal = pal, 
+            position = c('bottomright'), 
+            values = values(pop_density_change_mask), title = 'Pop density change <br> (people per hectare), <br> 2007 to 2024')
+
+```
+### Change in people per hectare summary stats
+```{r pop change summary stats, fig.width = 300}
+library(terra)
+library(dplyr)
+library(knitr)
+library(terra)
+
+pop_density_change_mask <- mask(pop_density_change, shp_county_26910)
+r <- pop_density_change_mask
+
+stats <- c(
+  min = round(global(r, min, na.rm = TRUE)[1,1],3),
+  p10 = round(global(r, quantile, probs = 0.10, na.rm = TRUE)[1,1], 3),
+  q1  = round(global(r, quantile, probs = 0.25, na.rm = TRUE)[1,1], 3),
+  median = round(global(r, median, na.rm = TRUE)[1,1],3),
+  mean = round(global(r, mean, na.rm = TRUE)[1,1],3),
+  q3  = round(global(r, quantile, probs = 0.75, na.rm = TRUE)[1,1],3),
+  p10 = round(global(r, quantile, probs = 0.90, na.rm = TRUE)[1,1], 3),
+  max = round(global(r, max, na.rm = TRUE)[1,1],3)
+)
+
+stats.table <- data.frame(Value =  stats) %>% t() %>% as.data.frame()
+colnames(stats.table) <- names(stats)
+row.names(stats.table) <- NULL
+
+
+knitr::kable(
+  stats.table,
+  caption = "Summary statistics, 2007 to 2024", digits = 3,
+  align = 'c') %>%
+  kable_classic() %>%
+  kable_styling("striped", position = 'left', full_width = FALSE)
+```
+
+## Intersection density maps: 
+```{r get intersection endpoints and lines for 2007, include = FALSE}
+# get endpoints, filter to King county
+endpoints_tbl_2007 <- st_read(con_str, query = 'SELECT * from edges.endpoints_53_2007')
+endpoints_filter_2007 <- st_filter(endpoints_tbl_2007, King_template_26910)
+
+# get edges and filter to local roads/paths 
+edges_2007 <- st_read('H:/projects/beh_nwi_smartmap/gisdata/us_census/edges/fe_2007_53033_edges.shp')
+edges_2007 <- edges_2007 %>%
+  dplyr::filter(startsWith(MTFCC, "S")) %>% 
+  dplyr::filter(!(MTFCC %in% c('S1100', 'S1500', 'S1630', 'S1640', 'S1730', 'S1750', 'S1780')))
+
+# get intersections (3+ end/start points of lines)
+intersections_3plus_tbl_2007 <- st_read(con_str, query = 'SELECT * from edges.intersections_3plus_53_2007') %>% 
+  dplyr::select(-geom_snap_buffer_26910)
+intersections_filter_2007 <- st_filter(intersections_3plus_tbl_2007, King_template_26910) 
+
+# transform for leaflet map
+endpoints_4326_2007 <- st_transform(endpoints_filter_2007, 4326)
+edges_4326_2007 <- st_transform(edges_2007, 4326)
+intersections_4326_2007 <- st_transform(intersections_filter_2007, 4326)
+
+```
+```{r get intersection endpoints and lines for 2024, include = FALSE}
+# get endpoints, filter to King county
+endpoints_tbl_2024 <- st_read(con_str, query = 'SELECT * from edges.endpoints_53_2024')
+endpoints_filter_2024 <- st_filter(endpoints_tbl_2024, King_template_26910)
+
+# get edges and filter to local roads/paths 
+edges_2024 <- st_read('H:/projects/beh_nwi_smartmap/gisdata/us_census/edges/tl_2024_53033_edges.shp')
+edges_2024 <- edges_2024 %>%
+  dplyr::filter(startsWith(MTFCC, "S")) %>% 
+  dplyr::filter(!(MTFCC %in% c('S1100', 'S1500', 'S1630', 'S1640', 'S1730', 'S1750', 'S1780')))
+
+# get intersections (3+ end/start points of lines)
+intersections_3plus_tbl_2024 <- st_read(con_str, query = 'SELECT * from edges.intersections_3plus_53_2024') %>% 
+  dplyr::select(-geom_snap_buffer_26910)
+intersections_filter_2024 <- st_filter(intersections_3plus_tbl_2024, King_template_26910) 
+
+# transform for leaflet map
+endpoints_4326_2024 <- st_transform(endpoints_filter_2024, 4326)
+edges_4326_2024 <- st_transform(edges_2024, 4326)
+intersections_4326_2024 <- st_transform(intersections_filter_2024, 4326)
+
+```
+```{r intersection density maps, eval = TRUE}
+library(leaflet.extras2)
+intersection_2007 <- ha_cropped_rast_2007[[2]]
+intersection_2024 <- ha_cropped_rast_2024[[2]]
+
+intersection_2007_4326<-project(intersection_2007, 'EPSG:4326')
+intersection_2024_4326<-project(intersection_2024, 'EPSG:4326')
+
+
+pal <- colorNumeric(c('white', 'cyan4', "#0C2C84"), 
+                    values(intersection_2007_4326),
+                    na.color = "transparent")
+
+intersection_density_2007 <- leaflet() %>%
+  addTiles() %>%
+# ## add roads & paths
+        addPolylines(
+          data = edges_4326_2007,
+          color = 'steelblue',
+          weight = 3,
+          opacity= 0.5,
+          popup = ~paste('MTFCC: ', MTFCC),
+          group = 'intersections'
+  ) %>%
+  addCircleMarkers(
+    data = intersections_4326_2007,
+          radius = 10,
+          fillColor = 'red',
+          fillOpacity = 0.7,
+          stroke = FALSE,
+          popup = ~paste0("tlids: ", tlid),
+          clusterOptions = markerClusterOptions(),
+          group = 'intersections'
+) %>%
+  addRasterImage(intersection_2007_4326, colors = pal, opacity = 0.75) %>% 
+  groupOptions(group = 'intersections', zoom = 14) %>%
+  addLegend(pal = pal, values = values(intersection_2007_4326), title = 'Intersections<br>
+            (per hectare),<br>2007')
+
+
+intersection_density_2024 <- leaflet() %>%
+  #addTiles(group = "Modern (Live)") %>%
+  addTiles()%>%
+  addRasterImage(intersection_2024_4326, colors = pal, opacity = 0.75) %>%
+  
+   addPolylines(
+          data = edges_4326_2024, 
+          color = 'steelblue', 
+          weight = 3, 
+          opacity= 0.5,
+          popup = ~paste('MTFCC: ', MTFCC),
+          group = 'intersections'
+                     ) %>%
+  addCircleMarkers(
+    data = intersections_4326_2024,
+          radius = 10,
+          fillColor = 'red',
+          fillOpacity = 0.7,
+          stroke = FALSE,
+          popup = ~paste0("tlids: ", tlid),
+          clusterOptions = markerClusterOptions(),
+          group = 'intersections') %>%
+    groupOptions(group = 'intersections', zoom = 14) %>%
+  addLegend(pal = pal, values = values(intersection_2024_4326), title = 'Intersection <br> 
+            (per hectare), <br> 
+            2024')
+
+```
+### Intersections per hectare (for 1km radial area around cell)*
+```{r print intersection maps, eval=TRUE, fig.width=8 }
+library(leafsync)
+leafsync::sync(
+                intersection_density_2007, 
+               intersection_density_2024, 
+               ncol = 1)
+```
+
+### Change in intersections per hectare (for 1km radial area), 2007 to 2024 
+```{r get change in intersection density, eval = TRUE}
+# get overlapping extents only
+intersection_2024_aligned <- terra::resample(intersection_2024_4326, intersection_2007_4326, method = 'bilinear')
+intersection_density_change = intersection_2024_aligned - intersection_2007_4326
+
+```
+```{r map intersection change, eval = TRUE}
+intersection_density_change_mask <- as.numeric(intersection_density_change)
+NAflag(intersection_density_change_mask) <- NA
+eps <- 0.001
+
+# intersection_density_change_mask <- ifelse(
+#   abs(intersection_density_change_mask) <= eps,
+#   NA,
+#   intersection_density_change_mask
+# )
+
+max_intersect <- global(abs(intersection_density_change_mask), fun = 'max', na.rm=TRUE)$max
+
+pal <- colorNumeric(
+  palette = "RdBu",
+  domain  = c(-max_intersect, max_intersect), ## create symmetry
+  na.color = "transparent"
+)
+
+#writeRaster(intersection_density_change_mask, 'H:/projects/beh_nwi_smartmap/intersection_qa_files/change_intersection_2007_2024_C.tiff', overwrite=TRUE)
+
+intersection_change_map <- leaflet() %>%
+  addTiles() %>%
+  addRasterImage(intersection_density_change_mask, colors = pal, opacity = 0.75) %>%
+  addLegend(pal = pal, 
+            position = c('bottomright'), 
+            values = values(intersection_density_change_mask), title = 'Change in intersection density, <br>2007 to 2024')
+```
+
+```{r print intersection change map}
+intersection_change_map
+```
+
+### Change in intersection density summary stats
+```{r intersection change summary stats}
+library(terra)
+library(dplyr)
+library(knitr)
+library(terra)
+
+r <- intersection_density_change
+
+stats <- c(
+  min = round(global(r, min, na.rm = TRUE)[1,1],3),
+  p10 = round(global(r, quantile, probs = 0.10, na.rm=TRUE)[1,1], 3),
+  q1  = round(global(r, quantile, probs = 0.25, na.rm = TRUE)[1,1], 3),
+  median = round(global(r, median, na.rm = TRUE)[1,1],3),
+  mean = round(global(r, mean, na.rm = TRUE)[1,1],3),
+  q3  = round(global(r, quantile, probs = 0.75, na.rm = TRUE)[1,1],3),
+  p95 = round(global(r, quantile, probs = 0.90, na.rm = TRUE)[1,1], 3),
+  max = round(global(r, max, na.rm = TRUE)[1,1],3)
+)
+
+
+stats.table <- data.frame(Value =  stats) %>% t() %>% as.data.frame()
+colnames(stats.table) <- names(stats)
+row.names(stats.table) <- NULL
+
+knitr::kable(
+  stats.table, 
+  caption = "Summary statistics, 2007 to 2024", digits = 3) %>%
+  kable_classic() %>%
+kableExtra::kable_styling(full_width = F)
+
+```
+
+## Business density maps
+```{r  business density maps}
+ business_2007 <- ha_cropped_rast_2007[[3]]
+ business_2024 <- ha_cropped_rast_2024[[3]]
+
+pal <- colorNumeric(c('white', 'cyan4', "#0C2C84"), values(business_2007),
+  na.color = "transparent")
+
+business_2007_map <- leaflet() %>%
+  addTiles() %>%
+  addRasterImage( business_2007, colors = pal, opacity = 0.75) %>%
+  addLegend(pal = pal, values = values( business_2007), title = ' business density , 2007')
+
+ pal <- colorNumeric(c('white', 'cyan4', "#0C2C84"), values(business_2024),
+   na.color = "transparent")
+
+business_2024_map<-leaflet() %>%
+  addTiles() %>%
+  addRasterImage( business_2024, colors = pal, opacity = 0.75) %>%
+  addLegend(pal = pal, values = values( business_2007), title = ' business density , 2024')
+
+```
+
+### Businessess per hectare (for 1km radial area around cell)
+```{r print business maps}
+library(leafsync)
+leafsync::sync(business_2007_map, 
+               business_2024_map)
+```
+
+### Change in business density (businessess per hectare for 1km radial area), 2007 to 2024
+```{r get change in  business density}
+# get overlapping extents only
+
+ business_2024_aligned <- terra::resample( business_2024,  business_2007, method = 'bilinear')
+ business_density_change =  business_2024_aligned -  business_2007
+# business_density_change$focal_sum[is.na( business_density_change$focal_sum)] <- 0
+
+shp_county_26910 <- st_transform(shp_county_template, st_crs( business_density_change))
+ business_density_change_mask <- mask( business_density_change, shp_county_26910)
+
+```
+```{r map business change}
+#business_density_change_mask[business_density_change_mask == 0] <- NA
+
+# Get top quartile for maping values
+q90 <- global(business_density_change_mask, fun = quantile, probs = 0.90, na.rm=TRUE)[1, 1]
+business_change_top <- business_density_change_mask
+business_change_top[business_change_top < q90] <- NA # remove values < top 10%
+business_change_top_pts <- as.points(business_change_top, na.rm=TRUE)
+names(business_change_top_pts)[1] <- 'value'
+business_change_pts_top_4326 <- project(business_change_top_pts, 'EPSG:4326')
+
+business_density_change_mask_4326 <- project(business_density_change_mask, 'EPSG:4326')
+#writeRaster(business_density_change_mask, 
+#'H:/projects/beh_nwi_smartmap/intersection_qa_files/change_business_density_2007_2024.tiff', overwrite=TRUE)
+
+pal <- colorNumeric(c('darkred', 'white', 'cyan4'), values( business_density_change_mask_4326),
+  na.color = "transparent")
+
+leaflet() %>%
+  addTiles() %>%
+  #  addCircleMarkers(
+  #    data = business_change_top_pts,
+  #   radius = 3,
+  #   fillOpacity = 0.7,
+  #   stroke = FALSE,
+  #   popup = ~paste("Value:", round(value, 2))
+  # ) %>%
+  addRasterImage( business_density_change_mask_4326, colors = pal, opacity = 0.75) %>%
+  addLegend(pal = pal, 
+            position = c('bottomright'), 
+            values = values( business_density_change_mask), title = 'Change in  business density, <br> 2007 to 2024')
+```
+
+### Change in business density summary stats
+```{r business change summary stats}
+library(terra)
+library(dplyr)
+library(knitr)
+
+library(terra)
+
+r <- business_density_change_mask
+
+stats <- c(
+  min = round(global(r, min, na.rm = TRUE)[1,1],3),
+  p10 = round(global(r, quantile, probs = 0.10, na.rm=TRUE)[1,1], 3),
+  q1  = round(global(r, quantile, probs = 0.25, na.rm = TRUE)[1,1], 3),
+  median = round(global(r, median, na.rm = TRUE)[1,1],3),
+  mean = round(global(r, mean, na.rm = TRUE)[1,1],3),
+  q3  = round(global(r, quantile, probs = 0.75, na.rm = TRUE)[1,1],3),
+  p95 = round(global(r, quantile, probs = 0.90, na.rm = TRUE)[1,1], 3),
+  max = round(global(r, max, na.rm = TRUE)[1,1],3)
+)
+
+
+stats.table <- data.frame(Value =  stats) %>% t() %>% as.data.frame()
+colnames(stats.table) <- names(stats)
+row.names(stats.table) <- NULL
+
+knitr::kable(
+  stats.table, 
+  caption = "Summary statistics, 2007 to 2024", digits = 3) %>%
+  kable_classic() %>% 
+  kable_styling(full_width = F)
+
+```
+
+## Composite Score maps: 
