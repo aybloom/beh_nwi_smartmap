@@ -1,4 +1,4 @@
-# beh_nwi_smartmap
+# Smartmap Walk Index ReadME
 codefiles for building smartmap database and adding data
 
 Work from BEH_SmartMap_Index.Rmd file to: 
