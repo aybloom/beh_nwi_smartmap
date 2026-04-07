@@ -1,4 +1,4 @@
-# Smartmap Walk Index ReadME
+# Smartmap Walk Index
 codefiles for building smartmap database and adding data
 
 Work from BEH_SmartMap_Index.Rmd file to: 
