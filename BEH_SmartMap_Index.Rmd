@@ -1,0 +1,508 @@
+---
+title: "Built Environment Neighborhood Walkability Index SmartMap"
+date: "2025-11-25"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      eval = FALSE)
+#install.packages("DT", type = "binary")
+```
+```{r load functions, eval=TRUE, echo=FALSE, message = FALSE}
+
+invisible(
+  capture.output(
+    suppressMessages(
+    suppressWarnings({
+
+list.of.packages <- c('dplyr', 'glue', 'vctrs', 'DT', 'tidycensus', 'terra')
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+lapply(list.of.packages,function(x){library(x,character.only=TRUE)}) 
+library(glue)
+library('RPostgres')
+library(tidyr)
+## UPDATE Working directory
+wd <- 'H:/projects/beh_nwi_smartmap'
+setwd('H:/projects/beh_nwi_smartmap')
+source(glue('{wd}/tools/create_walkability_measures.R'))
+source(glue('{wd}/tools/walkdb_setup.R'))
+
+## clear tigris cache before downloading:
+unlink(tigris::tigris_cache_dir('~/.tigris_cache'), recursive = TRUE)
+tigris::tigris_cache_dir("~/.tigris_cache")
+options(tigris_use_cache = FALSE)
+readRenviron('~/.Renviron')
+
+# connect to database & set dsn
+## update database username & password
+U <- us_census <- connectdb(dbname = 'nwi_smartmap', host = 'doyenne.csde.washington.edu', port = 5432, 
+                   password = 'csde4322', user = 'aybloom')
+dsn = "PG:host=doyenne.csde.washington.edu dbname=nwi_smartmap user=aybloom password=csde4322 port=5432" 
+
+})
+)))
+
+```
+
+# 1. Introduction
+This documentation is about preparation of three data sets to support creation of a walkability index for the local neighborhood around geocodes (See Rundle et al. 2019.). The downloaded and processed data is housed in the nwi_smartmap database hosted by uw csde. 
+
+Three data variables:
+
+  1. Street intersection density
+  1. Population density
+  1. Business density
+  
+Street intersection density is a central component of walkability indices. Greater intersection density is positively correlated with “connectivity” and negatively correlated with block face length. That is, smaller block faces result in more intersections. Smaller block faces result in a greater ability to visit locations within a study area, and a larger “network buffer”, ceteris paribus.
+
+We present an analytical framework and results for obtaining street intersections and subsequent intersection density within a Euclidean buffer for geocoded point locations using TIGER/Line shapefile data (for roads/intersections) and census tracts (for land area).
+
+Population density was likewise developed from US Census data (American Community Survey 5 year estimates). A key feature of this processing is to remove water areas using National Hydrography Data (NHD), so that all density measures used only the land area as the denominator, rather than the area of a home-based buffer, which could include water.
+
+Business density was developed using Data Axle (formerly Infogroup/InfoUSA) data.
+
+This variant of the data preparation uses the SmartMap format (Hurvitz et al. 2014). The benefit of using the SmartMap format is that the GIS processing has been done ahead of time. This obviates the need to select a point, create a buffer, and then measure from different GIS layers to generate the three input variables. With the SmartMap format, one only needs to provide a set of points representing a cohort, and then to pick the three raster values for each point. The three variables are then Z-scored and summed to create a walkability index for the cohort.
+
+# 2. Methods
+## 2.1 Pseudocode
+All data stored as geographies, EPSG 4269. Processing completely within R.
+
+  1. create schemas/tables
+    1. tracts
+    2. water areas
+    3. edges
+    4. businesses
+
+  2. land area (denominator)
+    1. get tracts and water areas for all counties in the selected year(s) using tigris
+    2. erase water features
+    3. convert to raster using a value of 1 (i.e., binary value indicating the cell represents land)
+    4. focal count of cells in 1 km radius (i.e., count of cells within buffer); multiply by cell area to get area of land in buffer
+  3. intersections
+    1. get edge data for all counties $year
+    2. create intersections using start/end points from edges, snap points, count aggregate (i.e., number of unique points at the same XY for the same year)
+    3. Remove danglers (dead-end streets)
+    4. Recalculate aggregate endpoints with danglers removed. 
+    5. limit intersections to ≥3 way
+    6. buffer intersections
+    7. convert buffers to raster where value is the number of “stacked” buffers at any cell location in the study area = count of intersections divide count of intersections raster by land area raster to get intersection density
+  4. population density
+    1. get population data using tidycensus and join to water-erased tracts
+    2. using water-erased tracts with population counts, calculate count of persons per cell (new field in table)
+    3. focal sum of persons per cell, results in estimate of count of persons within 1 km buffer
+    4. divide count of persons raster by land area raster to get population density
+  5. businesses
+    1. select set of walkable businesses by SIC code (in the Enclave)
+    2. buffer points (in Envlave)
+    3. convert buffers to raster where value is the number of “stacked” buffers at any cell location in the study area (in Enclave)
+    4. divide count of businesses raster by land area raster to get walkable business density (outside of Enclave)
+
+## 2.2 Check existing and create new schemas/tables
+
+  List current schemas and database tables set up in the nwi_smartmap database:
+  <!-- Should include: (1) tract land, (2) area water, (3) tract_nowater, (4) tract_variables, and (4) edges (intersections) -->
+
+```{r check db, eval = FALSE, echo = TRUE}
+# Ensure schemas exist
+check_for_schemas()
+# check for data by state / year
+state_year_list <- get_db_list_states_years()
+state_year_list %>% arrange(statefp, year)
+
+```
+
+  Create schemas to store
+    1. tracts
+    2. edges
+    3. businesses
+    
+```{r set up schemas, eval = FALSE, echo = TRUE}
+# set years / states list 
+year_list <- c(2007, 2016, 2024)
+state_abbr_list <- c('wa')
+
+# set up database partitions for years / states to add data
+f_setup_database(conn = U, year_list = year_list, state_abbr_list = state_abbr_list)
+
+```
+
+## 2.3 Download Tract-level data
+Function uses tigris to download tract data for set years. 
+
+### 2.3.1 Erase water from tracts
+Water was erased from tracts using the US Census water data. 
+*note that water data is not available for years prior to 2011, so for tract years <2011, use 2011 water data*
+
+Pseudocode:
+
+  1. Test for intersection tract multipolygon with water multipolygon
+  2. If there is no intersection, add tract to selected set
+  3. If there is an intersection, perform st_difference() to obtain tract that is not intersecting with water; add to selected set
+
+### 2.3.2 Population data
+Population data were downlaoded using tidycensus. 
+
+### 2.3.3 Merge Land no water with population data
+Tract-level population data was merged with tract area data (water-erased), and the population per raster cell is calcualted by dividing the tract population by the count of cells in a tract: 
+
+population / (st_area(geom_26910) / cell_area) as population_per_cell. The cell_area term in the current dataset is 10,000m, or the area of the cells (100m * 100m)
+
+## 2.4 Download Edges/Line data
+The county geoids were used to download TIGER/Line edges (which are available on a county-by-county basis). These were used to generate intersections.
+*Note: TIGER/Line edges for 2007 must use a different format for downloading*
+
+### 2.4.1 Generating intersection points, buffering
+Intersections were generated by pulling the start point and the end point of each TIGER/Line edge from edges matching the criteria for walkable streets, mtfcc ~* 'S.*' AND mtfcc NOT IN ('S1100', 'S1500', 'S1630', 'S1640', 'S1730', 'S1740', 'S1750', 'S1780'), see TIGER/Line Shapefiles Technical Documentation.
+
+The start and end points were snapped to 0.1 based on examination of previous output in which edges at locations that appeared to have an intersection generated none. One could consider start- and/or end-points at the same location to be “stacked”, allowing for counting multiple points at the same XY location. To remove cul-de-sacs, we removed lines whose start- and end- points were stacked. We also removed danlgers, or lines who had no stacking on one end of the line. A location where only two edges meet would have two nodes, but a location where more than two unique edges meet would have at least three nodes (form unique edges). Thus, after isolating the end points, aggregating by location, excluding cul-de-sacs and dangers,  and excluding aggregates with less than three nodes, we have a complete set of intersections.
+
+All of the download formatting functions are run in a loop with the function below:
+
+```{r add data, eval=FALSE, echo = TRUE}
+# download and add tract land, water, land with water erased, population variables and edges to database
+f_add_data_smartwalk_db(conn = U, years=year_list, state_abbr_list = state_abbr_list)
+```
+
+## 2.5 Rasterize data
+### 2.5.1 Check raster file availability for years / states
+
+  List of the raster files that have been created so far for each year. 
+  
+  Raster files should include: (1) land area, (2) population density, (3) intersection density, and (4) business density.
+  
+```{r list raster files, eval = FALSE, echo = TRUE}
+check_raster_files()
+```
+
+### 2.5.2 Rasterize and combine tract-level land data
+Combine tract-level data for each state/year from the database and rasterize using 1 to indicate land:
+
+  1. Pull all tract_no_water data for each state/year from the database
+  2. Combine all tract_no_water data for each state/year
+  3. Rasterize tract_no_water data using a value of 1 (i.e., binary value indicating the cell represents land). 
+  4. Generate a count of cells within 1km (focus processing)
+  5. Convert to area in hectares by dividing by 100. 
+  
+In the final land area raster file, each cell contains the total hectares per 1km buffer. 
+  
+### 2.5.3 Rasterize and combine tract-level population density data 
+  
+**Rasterize population per cell for each state/year.** 
+  1. Pull all tract_no_water data for each state/year from the database
+  2. Combine all tract_no_water data for each state/year
+  3. Rasterize tract-level data using the population per cell variable (raw state density pop raster files).
+  4. Generate the estimated count of persons within a 1km buffer by summing all cells within a 1km buffer (summed state density raster files)
+  5. Divide the summed population counts by the land density raster file to generate the population density per hectare (hectare state density pop raster file). 
+  
+In the final population density file, each cell contains the population density (total people per hectare) for a 1km buffer.
+
+### 2.5.4 Rasterize state-level intersection density data
+Using the database intersection data (>=3 nodes), rasterize data file and get intersection density. 
+  1. Generate buffers for each intersection
+  2. Rasterize the sum of the stacked intersection buffers
+  3. Divide the sum of stacked intersection buffers by the the land area raster to get intersection density. 
+  
+In the final intersection density file, each cell contains the intersection density (total intersections per hectare) for a 1km buffer. 
+
+Raster files for each dataset are created are created in a loop for each state / year in the provided state and year lists.
+
+```{r rasterize intersection, land, population, eval =FALSE, echo = TRUE}
+
+# Create raster files for tract land area, population density, intersection density 
+f_create_raster_files(conn = U, years = year_list, state_abbr_list = state_abbr_list)
+```
+
+### 2.5.5 Rasterize state-level business density data
+Businesses were handled within the database by creating a partitioned table where each partition represents a year of business data. This allowed using a single query to pull multiple years of data. A query was generated to select all walkable businesses based on a list of SIC codes. The walkable businesses from Data Axle business data were selected using SIC codes identified by Bethany Williams.
+
+Each walkable business was buffered with a radius of 1 km.
+
+The business point extract code was written on UWDC Enclave 1 (Where the Data Axle data are housed). 
+  1. Import 2016 land density raster file to ensure consistent extent of generated business density raster file
+  2. Select walkable business from Data Axle database and filter by state, year, and SIC code. 
+  3. Buffer business points by 1km
+  4. Generate a sum of stacked business points raster file
+  5. Export the business data raster file
+  6. Outside of the UWDC Enclave, divide the business data raster file by the land density file to get the walkable business density.
+  
+In the final business density file, each cell contains the total walkable businesses per hectare for a 1km buffer.
+
+*Note: use the code in the r_code_base folder while in the data enclave to create a raster file of businesses for a given year and state. The get_raster_stacks.r file creates and runs the function to create a raster.* 
+
+*To export the raw raster file, use the Data Enclave process to export from the data enclave and save the state_raster/business/{yr}/sum folder to run the function below.*
+
+```{r rasterize business data, eval = FALSE, echo = TRUE}
+ state_fips <- fips_codes %>% filter(state %in% toupper(state_abbr_list))
+ for(state_fips_code in unique(state_fips$state_code)){
+    for(yr in years){
+      business_sum_filepath <- glue('H:/projects/beh_nwi_smartmap/data/state_raster/business/{yr}/sum/state_raster_business_density_{yr}_{state_fips_code}.tif')
+      if(file.exists(business_sum_filepath)){
+      f_get_business_density(state_fips = state_fips_code,
+                             year = yr,
+                             verbose = TRUE)
+      } else if(!file.exists(business_sum_filepath)){
+       message(glue('.... need to extract business data for {year}, for {state} from the Data Enclave'))
+      }
+    }}
+```
+
+## 2.6 Create a composite measure
+The Composite walk measure is created by finding the year- and state- specific z-score of (1) businesses density, (2) population density, and (3) street network density and summing to create a composite measure. The function below calculates the z-score for each state/year and creates a raster files with the composite scores for a given year/state. 
+
+```{r create composite scores, eval = FALSE, echo = TRUE}
+ state_fips <- fips_codes %>% filter(state %in% toupper(state_abbr_list))
+for(yr in year_list){
+  for(f in state_fips){
+
+# create composite walk scores
+f_create_composite_measure_raster(yr = yr, 
+                                              state_fips = f)
+}}
+```
+
+# 3. Results
+## 3.1 Data 
+Raster files are available for Intersection density, population density, business density, and a composite walk measure (combining business, population, and intersections) for PA, MN, and WA states for 2007, 2016, and 2024: 
+
+[Raster files] (https://drive.google.com/drive/folders/1eV0XFJ7GIRLGF-UfUyKp1WeMCnyHnhDz?usp=drive_link)
+
+## 3.2 Validation
+The following tables show that the raster results for the five test points match the vector results for the same location
+
+### 3.2.1 Raster Result Tables
+```{r validation, eval = TRUE, echo = FALSE}
+invisible(
+  capture.output(
+    suppressMessages(
+    suppressWarnings({
+      
+      smartwalk_results_2007 <- f_Smartmap_validation(con_str = dsn, conn = U, 
+                                  validation_points_filepath = 'H:/projects/beh_nwi_smartmap/validation_points.csv', 
+                                  year = 2007, 
+                                  state_fips = '53')
+     # setwd('H:/projects/beh_nwi_smartmap')
+      smartwalk_results_2024 <- f_Smartmap_validation(con_str = dsn, conn = U, 
+                                  validation_points_filepath = 'H:/projects/beh_nwi_smartmap/validation_points.csv', 
+                                  year = 2024, 
+                                  state_fips = '53')
+      })
+    )
+    )
+  )
+
+full_smartmap_results <- merge(as.data.frame(smartwalk_results_2007$data), as.data.frame(smartwalk_results_2024$data), by = 'gid', suffixes = c('_2007', '_2024'))
+
+full_smartmap_results <- full_smartmap_results %>% 
+  dplyr::select(gid, walk_score_z_2007, walk_score_z_2024, intersection_density_ha_2007, intersection_density_ha_2024, 
+                bus_density_ha_2007, bus_density_ha_2024, pop_density_ha_2007, pop_density_ha_2024)
+```
+
+**2007 Raster results for WA data**
+*Note that higher raster resolutions (100m) leads to larger differences in smartmap area versus vector results*
+```{r raster results for 2007, eval = TRUE}
+
+DT::datatable(smartwalk_results_2007$data %>%
+                rowwise() %>% 
+                mutate(perc_diff = ((smartmap_area_ha - buffer_area_ha)/buffer_area_ha)*100) %>%
+                ungroup() %>% 
+                dplyr::select(gid, smartmap_area_ha, buffer_area_ha, `% diff` = perc_diff,wa_intersections2007_density_ha = intersection_density_ha, 
+                              wa_business2007_density_ha = bus_density_ha, wa_tract2007_population_density = pop_density_ha)  %>%
+                dplyr::mutate(across(where(is.numeric), ~round(., 2))),
+                              )
+
+```
+
+**2024 Raster results for WA data**
+```{r raster results for 2024, eval = TRUE}
+
+DT::datatable(smartwalk_results_2024$data %>%
+                rowwise() %>% 
+                mutate(perc_diff = ((smartmap_area_ha - buffer_area_ha)/buffer_area_ha)*100) %>%
+                ungroup() %>% 
+                dplyr::select(gid, smartmap_area_ha, buffer_area_ha, `% diff` = perc_diff,wa_intersections2024_density_ha = intersection_density_ha, 
+                              wa_business2024_density_ha = bus_density_ha, wa_tract2024_population_density = pop_density_ha)  %>%
+                dplyr::mutate(across(where(is.numeric), ~round(., 2))),
+                              )
+
+```
+
+
+**Find change in walk variables from 2007 to 2024**
+*Walk score z estimates are a sum of z-scores for each variable*
+```{r full results table, eval = TRUE}
+DT::datatable(full_smartmap_results %>% 
+                 dplyr::select('gid', walk_score_z_2007, walk_score_z_2024, pop_density_ha_2007, pop_density_ha_2024, 
+                               intersection_density_ha_2007, intersection_density_ha_2024, 
+                               bus_density_ha_2007, bus_density_ha_2024) %>%
+                dplyr::mutate(across(where(is.numeric), ~round(., 2))),
+              colnames = c('GID', 'Walk score (2007)', 'Walk score (2024)', 'Pop density (2007)', 'Pop density (2024)', 
+                           'Intersection density (2007)', 'Intersection density (2024)', 
+                           'Business density (2007)', 'Business density (2024)')
+                )
+
+
+```
+
+```{r create result maps, eval = FALSE}
+max_walk <- max(abs(smartwalk_results_2007$data$walk_score_z), na.rm=TRUE)
+
+pal_walk <- leaflet::colorNumeric(
+  palette = "RdBu",
+  domain  = c(-max_walk, max_walk), ## create symmetry
+  na.color = "transparent"
+)
+
+map_results_walkscore_2007 <- leaflet() %>%
+  addTiles () %>%
+  addPolygons(
+    data = smartwalk_results_2007$data,
+    fillColor = ~pal_walk(walk_score_z), 
+    fillOpacity = 0.7, 
+   # color = 'grey', 
+    weight = 0.5, 
+    opacity = 1, 
+      popup = ~paste0(
+       "<strong>ID:</strong> ", gid, "<br>",
+        "<strong>Change %:</strong> ", walk_score_z
+     )
+    )%>%
+   addControl(
+    html = "<h3> Composite Walk Score (2007)</h3>", 
+    position = 'topright'
+  )%>%
+  addLegend(
+    pal = pal_walk,
+    values = smartwalk_results_2007$data$walk_score_z,
+    title = "Composite walk score (2007)",
+    opacity = 0.7
+  )
+
+max_walk <- max(abs(smartwalk_results_2024$data$walk_score_z), na.rm=TRUE)
+
+pal_walk <- leaflet::colorNumeric(
+  palette = "RdBu",
+  domain  = c(-max_walk, max_walk), ## create symmetry
+  na.color = "transparent"
+)
+
+map_results_walkscore_2024 <- leaflet() %>%
+  addTiles () %>%
+  addPolygons(
+    data = smartwalk_results_2024$data,
+    fillColor = ~pal_walk(walk_score_z), 
+    fillOpacity = 0.7, 
+   # color = 'grey', 
+    weight = 0.5, 
+    opacity = 1, 
+      popup = ~paste0(
+       "<strong>ID:</strong> ", gid, "<br>",
+        "<strong> Walk score:</strong> ", walk_score_z
+     )
+    )%>%
+   addControl(
+    html = "<h3> Composite Walk Score (2024)</h3>", 
+    position = 'topright'
+  )%>%
+  addLegend(
+    pal = pal_walk,
+    values = smartwalk_results_2024$data$walk_score_z,
+    title = "Composite walk score (2024)",
+    opacity = 0.7
+  )
+
+```
+```{r print walk score maps, eval = FALSE}
+leafsync::sync(map_results_walkscore_2007, 
+               map_results_walkscore_2024,
+               ncol = 1)
+
+```
+
+# 4 References
+Hurvitz, Philip, Anne Moudon, Bumjoon Kang, Brian Saelens, and Glen Duncan. 2014. “Emerging Technologies for Assessing Physical Activity Behaviors in Space and Time.” Frontiers in Public Health 2. https://doi.org/10.3389/fpubh.2014.00002.
+
+Rundle, Andrew G., Yu Chen, James W. Quinn, Neloufar Rahai, Katherine Bartley, Stephen J. Mooney, Michael D. Bader, Anne Zeleniuch-Jacquotte, Gina S. Lovasi, and Kathryn M. Neckerman. 2019. “Development of a Neighborhood Walkability Index for Studying Neighborhood Physical Activity Contexts in Communities across the U.S. over the Past Three Decades.” J. Urban Heal. 96 (4): 583–90. https://doi.org/10.1007/s11524-019-00370-4.
+
+# 5 Source code
+
+All code files can be found in the [BEH NWI Smartmap repo](https://github.com/aybloom/beh_nwi_smartmap)
+
+## 5.1 Loop functions for adding data
+
+```{r loop functions,eval = TRUE}
+cat(readLines(glue('{wd}/tools/create_walkability_measures.R')), sep = "\n")
+
+```
+
+## 5.2 Database setup & downloads
+
+### 5.2.1 Tracts
+```{r database setup-tracts, eval = TRUE}
+cat(readLines(glue('{wd}/tools/tracts_download_postgis_partition.R')), sep = "\n")
+```
+
+### 5.2.2 Area Water 
+```{r database setup-water, eval = TRUE}
+cat(readLines(glue('{wd}/tools/area_water_download_postgis_partition.R')), sep = "\n")
+```
+
+### 5.2.3 Erase water
+```{r database setup erase water, eval = TRUE}
+cat(readLines(glue('{wd}/tools/tracts_erase_water.R')), sep = "\n")
+```
+
+### 5.2.4 Tract population
+```{r database setup-pop, eval = TRUE}
+cat(readLines(glue('{wd}/tools/tracts_population_download.R')), sep = "\n")
+cat(readLines(glue('{wd}/tools/tract_population_per_cell.R')), sep = "\n")
+```
+
+### 5.2.5 Intersections
+```{r database setup intersections, eval = TRUE}
+cat(readLines(glue('{wd}/tools/download_roads_edges.R')), sep = "\n")
+cat(readLines(glue('{wd}/tools/push_edges_to_db.R')), sep = "\n")
+cat(readLines(glue('{wd}/tools/create_intersection_buffers.R')), sep = "\n")
+```
+
+## 5.3 Create raster files for each variable
+### 5.3.1 Tract land area (no water)
+
+```{r rasterize land, eval = TRUE}
+cat(readLines(glue('{wd}/tools/tracts_rasterize_partition.R')), sep = "\n")
+```
+
+### 5.3.2 Population 
+```{r rasterize population, eval = TRUE}
+cat(readLines(glue('{wd}/tools/focal_area_functions.R')), sep = "\n")
+```
+
+### 5.3.3 Intersections
+```{r rasterize intersections, eval = TRUE}
+cat(readLines(glue('{wd}/tools/rasterize_state_intersections.R')), sep = "\n")
+```
+
+### 5.3.4 Business density
+**Run data enclave code to get raster of summed business counts and export**
+```{r rasterize business, eval = TRUE}
+cat(readLines(glue('{wd}/tools/get_business_density.R')), sep = "\n")
+```
+
+## 5.4 Create composite measure
+```{r create composite measure, eval = TRUE}
+cat(readLines(glue('{wd}/tools/create_composite_walk_measure.R')), sep = "\n")
+```
+
+## 5.5 Validate gps points
+**Validation functions can be used to generate smartmap data for gps points**
+```{r validate points, eval = TRUE}
+cat(readLines(glue('{wd}/tools/validate_smartmap_measures.R')), sep = "\n")
+```
